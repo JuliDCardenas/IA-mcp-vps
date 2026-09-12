@@ -34,7 +34,28 @@ cp config.docker.example.yaml config.yaml
 nano config.yaml
 ```
 
-## 3. Ajustar nombres reales de contenedores
+## 3. Ajustar UID/GID si hace falta
+
+El compose corre el contenedor como UID/GID `1000:1000`, que suele ser el usuario `ubuntu`.
+
+Verifica en el host:
+
+```bash
+id
+```
+
+Si no eres `1000:1000`, crea `.env`:
+
+```bash
+cat > .env <<'EOF'
+MCP_UID=1000
+MCP_GID=1000
+EOF
+```
+
+cambiando los números por los de `id`.
+
+## 4. Ajustar nombres reales de contenedores
 
 Antes de levantar, revisa nombres reales:
 
@@ -44,7 +65,7 @@ docker ps --format '{{.Names}}'
 
 Luego edita `allowed_containers` en `config.yaml` para que coincida exactamente.
 
-## 4. Ajustar rutas de compose si hace falta
+## 5. Ajustar rutas de compose si hace falta
 
 Busca archivos compose reales:
 
@@ -54,7 +75,7 @@ find /home/ubuntu -maxdepth 3 \( -name 'docker-compose.yml' -o -name 'compose.ym
 
 Si un stack usa `compose.yml` en vez de `docker-compose.yml`, ajusta `allowed_compose_projects`.
 
-## 5. Levantar
+## 6. Levantar
 
 ```bash
 docker compose up -d --build
@@ -69,17 +90,36 @@ docker compose up -d
 docker logs -f ia-mcp-vps
 ```
 
-## 6. Ver logs
+## 7. Ver estado
 
 ```bash
-docker logs -f ia-mcp-vps
+docker ps --filter name=ia-mcp-vps
+docker logs --tail 100 ia-mcp-vps
 ```
 
-## 7. Parar
+## 8. Probar acceso a archivo del home
+
+```bash
+docker exec -it ia-mcp-vps ls -l /mnt/stacks/tracker-noche-2026-08-20.log
+docker exec -it ia-mcp-vps python -c "from pathlib import Path; print(Path('/mnt/stacks/tracker-noche-2026-08-20.log').exists())"
+```
+
+## 9. Parar
 
 ```bash
 docker compose down
 ```
+
+## Nota sobre el restart loop
+
+El servidor actual usa transporte MCP por `stdio`. Si Docker no mantiene stdin abierto, el proceso puede cerrar inmediatamente y el contenedor queda reiniciando. Por eso el compose incluye:
+
+```yaml
+stdin_open: true
+tty: true
+```
+
+Para conexión remota real con Notion AI falta una fase posterior: transporte HTTP/SSE/Streamable HTTP + autenticación.
 
 ## Nota de seguridad
 

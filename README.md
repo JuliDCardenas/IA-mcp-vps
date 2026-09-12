@@ -23,19 +23,11 @@ Permitir diagnóstico y acciones acotadas sobre el VPS usando herramientas segur
 5. Cambios por patch + backup + validación.
 6. Auditoría de acciones.
 
-## Nota de dependencia MCP
-
-El código inicial usa `FastMCP`, que pertenece al SDK MCP v1. Por eso `pyproject.toml` fija:
-
-```txt
-mcp>=1.2.0,<2.0.0
-```
-
-Si se actualiza a MCP SDK v2, hay que migrar a `MCPServer`.
-
 ## VPS actual
 
 El compose asume que los stacks viven en `/home/ubuntu` y se montan dentro del contenedor como `/mnt/stacks`.
+
+El contenedor corre por defecto como UID/GID `1000:1000`, que normalmente corresponde a `ubuntu`, para poder leer `/home/ubuntu` sin correr como root.
 
 ## Ejecución con Docker
 
@@ -50,13 +42,14 @@ docker compose up -d --build
 docker logs -f ia-mcp-vps
 ```
 
-Si venías de una imagen fallida con MCP 2.x, reconstruye sin caché:
+Si el contenedor queda reiniciando o venías de una imagen anterior:
 
 ```bash
 docker compose down
 docker compose build --no-cache
 docker compose up -d
-docker logs -f ia-mcp-vps
+docker ps --filter name=ia-mcp-vps
+docker logs --tail 100 ia-mcp-vps
 ```
 
 Más detalle en [`docs/docker.md`](docs/docker.md).

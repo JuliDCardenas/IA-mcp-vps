@@ -3,6 +3,17 @@ services:
     build: .
     container_name: ia-mcp-vps
     restart: unless-stopped
+
+    # El MCP actual corre por stdio. Sin stdin abierto, el proceso puede terminar
+    # y Docker entra en restart loop. Esto mantiene el proceso vivo para pruebas.
+    stdin_open: true
+    tty: true
+
+    # En el VPS de Julian, /home/ubuntu normalmente pertenece a UID/GID 1000.
+    # Correr con ese usuario permite leer los stacks montados sin usar root.
+    # Si tu usuario host tiene otro UID/GID, crea .env con MCP_UID/MCP_GID.
+    user: "${MCP_UID:-1000}:${MCP_GID:-1000}"
+
     environment:
       IA_MCP_VPS_CONFIG: /config/config.yaml
     volumes:
