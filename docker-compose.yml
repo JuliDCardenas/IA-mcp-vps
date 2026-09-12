@@ -10,9 +10,10 @@ services:
       - ./audit:/app/audit
       - ./backups:/app/backups
 
-      # Ajusta estas rutas según el VPS real.
-      # La ruta izquierda es del host; la derecha es la ruta visible dentro del contenedor.
-      - /opt/gps-tracker:/mnt/gps-stack
+      # Stacks del VPS de Julian.
+      # Todos viven bajo /home/ubuntu en el host y se exponen bajo /mnt/stacks.
+      # No se monta / completo.
+      - /home/ubuntu:/mnt/stacks
       - /var/log:/mnt/host-logs:ro
 
       # Permite consultar/reiniciar contenedores del host.

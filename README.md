@@ -1,6 +1,6 @@
 # IA MCP VPS
 
-MCP Server para mantenimiento controlado del VPS asociado a GPS Tracker Logan.
+MCP Server para mantenimiento controlado del VPS asociado a GPS Tracker Logan y al stack personal de Julián.
 
 ## Objetivo
 
@@ -23,12 +23,19 @@ Permitir diagnóstico y acciones acotadas sobre el VPS usando herramientas segur
 5. Cambios por patch + backup + validación.
 6. Auditoría de acciones.
 
+## VPS actual
+
+El compose asume que los stacks viven en `/home/ubuntu` y se montan dentro del contenedor como `/mnt/stacks`.
+
 ## Ejecución con Docker
 
 ```bash
+cd ~/IA-mcp-vps
 git pull
 cp config.docker.example.yaml config.yaml
-# editar config.yaml si las rutas/contenedores reales cambian
+# revisar nombres reales de contenedores
+docker ps --format '{{.Names}}'
+# editar config.yaml si rutas/contenedores reales cambian
 docker compose up -d --build
 docker logs -f ia-mcp-vps
 ```

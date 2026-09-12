@@ -10,16 +10,59 @@ security:
     - /etc/shadow
     - /etc/sudoers
     - /home/*/.ssh
+    - /mnt/stacks/.ssh
+    - /mnt/stacks/**/.ssh
   deny_file_names:
     - .env
     - id_rsa
     - id_ed25519
+    - authorized_keys
 
 allowed_paths:
-  gps_stack:
-    root: /mnt/gps-stack
+  home_stacks:
+    root: /mnt/stacks
+    writable: false
+    extensions: [.py, .yml, .yaml, .json, .txt, .md, .conf, .sh, .log]
+  mosquitto:
+    root: /mnt/stacks/mosquitto
     writable: true
-    extensions: [.py, .yml, .yaml, .json, .txt, .md, .conf]
+    extensions: [.py, .yml, .yaml, .json, .txt, .md, .conf, .sh]
+  traccar:
+    root: /mnt/stacks/traccar
+    writable: true
+    extensions: [.py, .yml, .yaml, .json, .txt, .md, .conf, .sh, .xml]
+  homepage:
+    root: /mnt/stacks/homepage
+    writable: true
+    extensions: [.yml, .yaml, .json, .txt, .md, .conf]
+  n8n:
+    root: /mnt/stacks/n8n
+    writable: true
+    extensions: [.yml, .yaml, .json, .txt, .md, .conf]
+  prometheus:
+    root: /mnt/stacks/prometheus
+    writable: true
+    extensions: [.yml, .yaml, .json, .txt, .md, .conf]
+  chatwoot:
+    root: /mnt/stacks/Chatwoot
+    writable: true
+    extensions: [.yml, .yaml, .json, .txt, .md, .conf]
+  evolution:
+    root: /mnt/stacks/evolution
+    writable: true
+    extensions: [.yml, .yaml, .json, .txt, .md, .conf]
+  evolution_api_pdp:
+    root: /mnt/stacks/EvolutionApiPdP
+    writable: true
+    extensions: [.yml, .yaml, .json, .txt, .md, .conf]
+  codeserver:
+    root: /mnt/stacks/codeserver
+    writable: true
+    extensions: [.yml, .yaml, .json, .txt, .md, .conf]
+  infra_backup:
+    root: /mnt/stacks/infra-backup
+    writable: true
+    extensions: [.yml, .yaml, .json, .txt, .md, .conf, .sh]
   host_logs:
     root: /mnt/host-logs
     writable: false
@@ -28,12 +71,37 @@ allowed_paths:
 allowed_services:
   - mosquitto
   - traccar
+  - docker
 
+# Ajustar con `docker ps --format '{{.Names}}'` en el VPS.
 allowed_containers:
   - mosquitto
   - traccar
   - subscriber-json-osmand
+  - homepage
+  - n8n
+  - prometheus
+  - chatwoot
+  - evolution
+  - codeserver
+  - ollama
 
 allowed_compose_projects:
-  gps_stack:
-    path: /mnt/gps-stack/docker-compose.yml
+  mosquitto:
+    path: /mnt/stacks/mosquitto/docker-compose.yml
+  traccar:
+    path: /mnt/stacks/traccar/docker-compose.yml
+  homepage:
+    path: /mnt/stacks/homepage/docker-compose.yml
+  n8n:
+    path: /mnt/stacks/n8n/docker-compose.yml
+  prometheus:
+    path: /mnt/stacks/prometheus/docker-compose.yml
+  chatwoot:
+    path: /mnt/stacks/Chatwoot/docker-compose.yml
+  evolution:
+    path: /mnt/stacks/evolution/docker-compose.yml
+  evolution_api_pdp:
+    path: /mnt/stacks/EvolutionApiPdP/docker-compose.yml
+  codeserver:
+    path: /mnt/stacks/codeserver/docker-compose.yml

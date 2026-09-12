@@ -1,8 +1,29 @@
 # Ejecución con Docker
 
+## Contexto del VPS actual
+
+Los stacks viven bajo `/home/ubuntu` en el host:
+
+```txt
+/home/ubuntu/BasesDeDatos
+/home/ubuntu/Chatwoot
+/home/ubuntu/EvolutionApiPdP
+/home/ubuntu/homepage
+/home/ubuntu/n8n
+/home/ubuntu/mosquitto
+/home/ubuntu/prometheus
+/home/ubuntu/traccar
+/home/ubuntu/codeserver
+/home/ubuntu/evolution
+/home/ubuntu/ollama
+```
+
+El compose monta `/home/ubuntu` como `/mnt/stacks` dentro del contenedor.
+
 ## 1. Actualizar repo
 
 ```bash
+cd ~/IA-mcp-vps
 git pull
 ```
 
@@ -13,80 +34,52 @@ cp config.docker.example.yaml config.yaml
 nano config.yaml
 ```
 
-Ajusta especialmente:
+## 3. Ajustar nombres reales de contenedores
 
-- `allowed_paths.gps_stack.root`
-- nombres reales de contenedores en `allowed_containers`
-- ruta real del `docker-compose.yml` del stack GPS
+Antes de levantar, revisa nombres reales:
 
-Si usas el `docker-compose.yml` incluido, recuerda que dentro del contenedor el stack GPS se ve como:
-
-```txt
-/mnt/gps-stack
+```bash
+docker ps --format '{{.Names}}'
 ```
 
-porque el host monta:
+Luego edita `allowed_containers` en `config.yaml` para que coincida exactamente.
 
-```txt
-/opt/gps-tracker:/mnt/gps-stack
+## 4. Ajustar rutas de compose si hace falta
+
+Busca archivos compose reales:
+
+```bash
+find /home/ubuntu -maxdepth 3 \( -name 'docker-compose.yml' -o -name 'compose.yml' -o -name 'docker-compose.yaml' -o -name 'compose.yaml' \) -print
 ```
 
-Si tu stack GPS vive en otra ruta del host, cambia la ruta izquierda del volumen.
+Si un stack usa `compose.yml` en vez de `docker-compose.yml`, ajusta `allowed_compose_projects`.
 
-## 3. Levantar
+## 5. Levantar
 
 ```bash
 docker compose up -d --build
 ```
 
-## 4. Ver logs
+## 6. Ver logs
 
 ```bash
 docker logs -f ia-mcp-vps
 ```
 
-## 5. Parar
+## 7. Parar
 
 ```bash
 docker compose down
 ```
 
-## Nota de seguridad sobre Docker socket
+## Nota de seguridad
 
-El compose monta:
+Se monta `/home/ubuntu`, no `/`. Además `home_stacks` queda read-only a nivel lógico en `config.yaml`; los scopes específicos son los escribibles. El contenedor sí tiene el volumen de `/home/ubuntu` montado con permisos de host, así que los guardrails del código son críticos.
+
+También se monta:
 
 ```yaml
 /var/run/docker.sock:/var/run/docker.sock
 ```
 
-Esto permite que el MCP consulte y reinicie contenedores del host. Es útil, pero sensible. Por eso las herramientas deben mantener allowlist estricta y no debe existir shell libre.
-
-## Troubleshooting
-
-### `config.yaml` no existe
-
-Crear desde el ejemplo:
-
-```bash
-cp config.docker.example.yaml config.yaml
-```
-
-### La ruta `/opt/gps-tracker` no existe
-
-Edita `docker-compose.yml` y cambia:
-
-```yaml
-- /opt/gps-tracker:/mnt/gps-stack
-```
-
-por la ruta real del stack GPS en el VPS.
-
-### Permiso denegado con Docker
-
-El contenedor usa `docker.io` y monta `docker.sock`. Si hay errores de permisos, primero prueba si el socket está montado:
-
-```bash
-docker exec -it ia-mcp-vps ls -l /var/run/docker.sock
-```
-
-En fase posterior ajustaremos usuario/grupo para Docker de forma más limpia si hace falta.
+Esto da capacidad fuerte sobre Docker del host. Por eso no debe existir herramienta de shell libre y los reinicios deben pasar por allowlist.
