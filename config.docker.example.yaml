@@ -1,0 +1,39 @@
+server:
+  name: IA MCP VPS
+  environment: docker
+
+security:
+  max_file_bytes: 200000
+  max_log_lines: 500
+  deny_paths:
+    - /root
+    - /etc/shadow
+    - /etc/sudoers
+    - /home/*/.ssh
+  deny_file_names:
+    - .env
+    - id_rsa
+    - id_ed25519
+
+allowed_paths:
+  gps_stack:
+    root: /mnt/gps-stack
+    writable: true
+    extensions: [.py, .yml, .yaml, .json, .txt, .md, .conf]
+  host_logs:
+    root: /mnt/host-logs
+    writable: false
+    extensions: [.log, .txt]
+
+allowed_services:
+  - mosquitto
+  - traccar
+
+allowed_containers:
+  - mosquitto
+  - traccar
+  - subscriber-json-osmand
+
+allowed_compose_projects:
+  gps_stack:
+    path: /mnt/gps-stack/docker-compose.yml

@@ -1,0 +1,24 @@
+services:
+  ia-mcp-vps:
+    build: .
+    container_name: ia-mcp-vps
+    restart: unless-stopped
+    environment:
+      IA_MCP_VPS_CONFIG: /config/config.yaml
+    volumes:
+      - ./config.yaml:/config/config.yaml:ro
+      - ./audit:/app/audit
+      - ./backups:/app/backups
+
+      # Ajusta estas rutas según el VPS real.
+      # La ruta izquierda es del host; la derecha es la ruta visible dentro del contenedor.
+      - /opt/gps-tracker:/mnt/gps-stack
+      - /var/log:/mnt/host-logs:ro
+
+      # Permite consultar/reiniciar contenedores del host.
+      # OJO: docker.sock equivale a mucho poder sobre el host; mantener allowlists estrictas.
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    # No publicar puertos todavía. El transporte remoto MCP se define en una fase posterior.
+    # ports:
+    #   - "8787:8787"
