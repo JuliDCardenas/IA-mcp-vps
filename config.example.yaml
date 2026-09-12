@@ -1,0 +1,14 @@
+server:
+  name: IA MCP VPS
+security:
+  max_file_bytes: 200000
+  max_log_lines: 500
+  deny_paths: [/root, /etc/shadow, /etc/sudoers, /home/*/.ssh]
+  deny_file_names: [.env, id_rsa, id_ed25519]
+allowed_paths:
+  gps_stack:
+    root: /opt/gps-tracker
+    writable: true
+    extensions: [.py, .yml, .yaml, .json, .txt, .md, .conf]
+allowed_containers: [mosquitto, traccar, subscriber-json-osmand]
+allowed_services: [mosquitto, traccar]
