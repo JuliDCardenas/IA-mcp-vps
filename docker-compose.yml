@@ -4,18 +4,15 @@ services:
     container_name: ia-mcp-vps
     restart: unless-stopped
 
-    # El MCP actual corre por stdio. Sin stdin abierto, el proceso puede terminar
-    # y Docker entra en restart loop. Esto mantiene el proceso vivo para pruebas.
-    stdin_open: true
-    tty: true
-
-    # En el VPS de Julian, /home/ubuntu normalmente pertenece a UID/GID 1000.
-    # Correr con ese usuario permite leer los stacks montados sin usar root.
+    # En el VPS de Julian, /home/ubuntu pertenece a UID/GID 1001.
     # Si tu usuario host tiene otro UID/GID, crea .env con MCP_UID/MCP_GID.
-    user: "${MCP_UID:-1000}:${MCP_GID:-1000}"
+    user: "${MCP_UID:-1001}:${MCP_GID:-1001}"
 
     environment:
       IA_MCP_VPS_CONFIG: /config/config.yaml
+      IA_MCP_VPS_TRANSPORT: http
+      IA_MCP_VPS_HOST: 0.0.0.0
+      IA_MCP_VPS_PORT: 8787
     volumes:
       - ./config.yaml:/config/config.yaml:ro
       - ./audit:/app/audit
@@ -31,6 +28,6 @@ services:
       # OJO: docker.sock equivale a mucho poder sobre el host; mantener allowlists estrictas.
       - /var/run/docker.sock:/var/run/docker.sock
 
-    # No publicar puertos todavía. El transporte remoto MCP se define en una fase posterior.
-    # ports:
-    #   - "8787:8787"
+    # Publicar solo en localhost del host; Caddy hace reverse proxy HTTPS.
+    ports:
+      - "127.0.0.1:8787:8787"

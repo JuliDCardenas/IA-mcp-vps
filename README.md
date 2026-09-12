@@ -23,49 +23,37 @@ Permitir diagnóstico y acciones acotadas sobre el VPS usando herramientas segur
 5. Cambios por patch + backup + validación.
 6. Auditoría de acciones.
 
-## VPS actual
+## Transporte remoto
 
-El compose asume que los stacks viven en `/home/ubuntu` y se montan dentro del contenedor como `/mnt/stacks`.
+El servidor usa FastMCP 2.x y corre por HTTP en el puerto interno `8787`.
 
-El contenedor corre por defecto como UID/GID `1000:1000`, que normalmente corresponde a `ubuntu`, para poder leer `/home/ubuntu` sin correr como root.
+Docker publica solo en localhost del host:
+
+```txt
+127.0.0.1:8787:8787
+```
+
+Caddy debe exponer HTTPS en:
+
+```txt
+https://mcp.julidcardenas.site
+```
+
+con Bearer token en el reverse proxy. Ver [`docs/caddy.md`](docs/caddy.md).
 
 ## Ejecución con Docker
 
 ```bash
 cd ~/IA-mcp-vps
 git pull
-cp config.docker.example.yaml config.yaml
-# revisar nombres reales de contenedores
-docker ps --format '{{.Names}}'
-# editar config.yaml si rutas/contenedores reales cambian
-docker compose up -d --build
-docker logs -f ia-mcp-vps
-```
-
-Si el contenedor queda reiniciando o venías de una imagen anterior:
-
-```bash
 docker compose down
 docker compose build --no-cache
 docker compose up -d
-docker ps --filter name=ia-mcp-vps
 docker logs --tail 100 ia-mcp-vps
 ```
 
 Más detalle en [`docs/docker.md`](docs/docker.md).
 
-## Ejecución sin Docker
-
-En Ubuntu normalmente usar `python3`, no `python`:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
-cp config.example.yaml config.yaml
-python3 -m dari_mcp_vps.server
-```
-
 ## Estado
 
-Bootstrap inicial. No exponer a Internet hasta completar transporte remoto, autenticación y pruebas.
+Bootstrap remoto inicial. No conectar a clientes externos hasta configurar Caddy con HTTPS + Bearer token.

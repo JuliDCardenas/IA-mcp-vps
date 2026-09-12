@@ -13,12 +13,11 @@ COPY src ./src
 
 RUN pip install --no-cache-dir -e .
 
-RUN useradd -m -u 10001 mcpuser \
-    && mkdir -p /app/audit /app/backups \
-    && chown -R mcpuser:mcpuser /app
-
-USER mcpuser
+RUN mkdir -p /app/audit /app/backups && chmod -R 775 /app
 
 ENV IA_MCP_VPS_CONFIG=/config/config.yaml
+ENV IA_MCP_VPS_TRANSPORT=http
+ENV IA_MCP_VPS_HOST=0.0.0.0
+ENV IA_MCP_VPS_PORT=8787
 
 CMD ["python", "-m", "dari_mcp_vps.server"]

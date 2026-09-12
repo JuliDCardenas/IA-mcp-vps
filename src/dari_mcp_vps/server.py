@@ -1,4 +1,9 @@
-from mcp.server.fastmcp import FastMCP
+from __future__ import annotations
+
+import os
+
+from fastmcp import FastMCP
+
 from dari_mcp_vps.config import load_config
 from dari_mcp_vps.tools.system import register_system_tools
 from dari_mcp_vps.tools.filesystem import register_filesystem_tools
@@ -6,12 +11,27 @@ from dari_mcp_vps.tools.validators import register_validator_tools
 from dari_mcp_vps.tools.docker_tools import register_docker_tools
 
 CONFIG = load_config()
-mcp = FastMCP(CONFIG.raw.get('server', {}).get('name', 'IA MCP VPS'))
+mcp = FastMCP(CONFIG.raw.get("server", {}).get("name", "IA MCP VPS"))
 
 register_system_tools(mcp, CONFIG)
 register_filesystem_tools(mcp, CONFIG)
 register_validator_tools(mcp, CONFIG)
 register_docker_tools(mcp, CONFIG)
 
-if __name__ == '__main__':
-    mcp.run()
+
+def main() -> None:
+    transport = os.getenv("IA_MCP_VPS_TRANSPORT", "http")
+    host = os.getenv("IA_MCP_VPS_HOST", "0.0.0.0")
+    port = int(os.getenv("IA_MCP_VPS_PORT", "8787"))
+
+    if transport == "stdio":
+        mcp.run()
+        return
+
+    # FastMCP 2.x HTTP transport for remote MCP clients.
+    # Auth is expected at the reverse proxy layer for now (Caddy/Nginx Bearer token).
+    mcp.run(transport=transport, host=host, port=port)
+
+
+if __name__ == "__main__":
+    main()
