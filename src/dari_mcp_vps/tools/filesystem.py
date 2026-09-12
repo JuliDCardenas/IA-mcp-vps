@@ -1,5 +1,6 @@
 import subprocess
 from collections import deque
+from datetime import datetime, timezone
 from dari_mcp_vps.security import resolve_allowed_path, assert_allowed_extension, is_denied_path
 
 def _read_limited(path, max_bytes):
@@ -7,6 +8,13 @@ def _read_limited(path, max_bytes):
     if len(data) > max_bytes:
         raise ValueError(f'File too large: {len(data)} bytes > {max_bytes}')
     return data.decode('utf-8', errors='replace')
+
+def _count_lines(path):
+    count = 0
+    with path.open('rb') as fh:
+        for _ in fh:
+            count += 1
+    return count
 
 def register_filesystem_tools(mcp, app_config):
     @mcp.tool()
@@ -23,6 +31,27 @@ def register_filesystem_tools(mcp, app_config):
                 continue
             items.append({'name': child.name, 'is_dir': child.is_dir(), 'size': child.stat().st_size})
         return items
+
+    @mcp.tool()
+    def file_info(scope: str, path: str, count_lines: bool = True):
+        """Return metadata for a file in an allowed scope, including optional line count for logs."""
+        target = resolve_allowed_path(app_config.raw, scope, path)
+        assert_allowed_extension(app_config.raw, scope, target)
+        if not target.exists():
+            raise FileNotFoundError(str(target))
+        stat = target.stat()
+        result = {
+            'name': target.name,
+            'is_file': target.is_file(),
+            'is_dir': target.is_dir(),
+            'size_bytes': stat.st_size,
+            'modified_utc': datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+            'scope': scope,
+            'path': path,
+        }
+        if target.is_file() and count_lines:
+            result['line_count'] = _count_lines(target)
+        return result
 
     @mcp.tool()
     def read_file(scope: str, path: str):

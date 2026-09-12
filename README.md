@@ -11,7 +11,7 @@ Permitir diagnóstico y acciones acotadas sobre el VPS usando herramientas segur
 - Diagnóstico read-only.
 - Estado básico de Docker.
 - Lectura/búsqueda de archivos en rutas permitidas.
-- Lectura eficiente de logs grandes por rango o cola.
+- Lectura eficiente de logs grandes por rango, cola o metadatos.
 - Validación YAML/JSON.
 - Base para auditoría, backups y edición por parches.
 
@@ -34,13 +34,17 @@ Docker publica solo en localhost del host:
 127.0.0.1:8787:8787
 ```
 
-Caddy debe exponer HTTPS en:
+Caddy expone HTTPS en:
 
 ```txt
-https://mcp.julidcardenas.site
+https://mcp.julidcardenas.site/mcp
 ```
 
 con Bearer token en el reverse proxy. Ver [`docs/caddy.md`](docs/caddy.md).
+
+## Uso por IA
+
+Ver [`docs/ai-usage.md`](docs/ai-usage.md) para defaults operativos, herramientas disponibles y log principal del proyecto GPS.
 
 ## Ejecución con Docker
 
