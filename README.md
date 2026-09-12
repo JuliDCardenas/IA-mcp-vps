@@ -11,6 +11,7 @@ Permitir diagnóstico y acciones acotadas sobre el VPS usando herramientas segur
 - Diagnóstico read-only.
 - Estado básico de Docker.
 - Lectura/búsqueda de archivos en rutas permitidas.
+- Lectura eficiente de logs grandes por rango o cola.
 - Validación YAML/JSON.
 - Base para auditoría, backups y edición por parches.
 
@@ -56,4 +57,4 @@ Más detalle en [`docs/docker.md`](docs/docker.md).
 
 ## Estado
 
-Bootstrap remoto inicial. No conectar a clientes externos hasta configurar Caddy con HTTPS + Bearer token.
+Bootstrap remoto inicial. No agregar herramientas destructivas sin guardrails y confirmación.

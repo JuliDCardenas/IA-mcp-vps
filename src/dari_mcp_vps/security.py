@@ -7,6 +7,14 @@ class SecurityError(ValueError):
 def _matches_any(value, patterns):
     return any(fnmatch.fnmatch(value, pattern) for pattern in patterns)
 
+def is_denied_path(config, path: Path):
+    path_str = str(path)
+    if _matches_any(path_str, config.get('security', {}).get('deny_paths', [])):
+        return True
+    if path.name in config.get('security', {}).get('deny_file_names', []):
+        return True
+    return False
+
 def resolve_allowed_path(config, scope, relative_path='.'):
     scopes = config.get('allowed_paths', {})
     if scope not in scopes:
@@ -15,11 +23,15 @@ def resolve_allowed_path(config, scope, relative_path='.'):
     candidate = (root / relative_path).resolve()
     if not str(candidate).startswith(str(root)):
         raise SecurityError('Path escapes allowed root')
-    if _matches_any(str(candidate), config.get('security', {}).get('deny_paths', [])):
+    if is_denied_path(config, candidate):
         raise SecurityError('Path is denied')
-    if candidate.name in config.get('security', {}).get('deny_file_names', []):
-        raise SecurityError('File name is denied')
     return candidate
+
+def assert_allowed_extension(config, scope, path: Path):
+    scopes = config.get('allowed_paths', {})
+    allowed_ext = set(scopes.get(scope, {}).get('extensions', []))
+    if path.is_file() and allowed_ext and path.suffix not in allowed_ext:
+        raise SecurityError(f'Extension not allowed: {path.suffix}')
 
 def assert_allowed_name(config, key, name):
     if name not in set(config.get(key, [])):
