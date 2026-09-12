@@ -60,6 +60,15 @@ Si un stack usa `compose.yml` en vez de `docker-compose.yml`, ajusta `allowed_co
 docker compose up -d --build
 ```
 
+Si vienes del error `No module named 'mcp.server.fastmcp'`, reconstruye sin caché para instalar `mcp<2`:
+
+```bash
+docker compose down
+docker compose build --no-cache
+docker compose up -d
+docker logs -f ia-mcp-vps
+```
+
 ## 6. Ver logs
 
 ```bash

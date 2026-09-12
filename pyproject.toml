@@ -3,7 +3,11 @@ name = "ia-mcp-vps"
 version = "0.1.0"
 description = "MCP server seguro para mantenimiento controlado de VPS"
 requires-python = ">=3.11"
-dependencies = ["mcp>=1.2.0", "PyYAML>=6.0.2", "psutil>=6.0.0"]
+dependencies = [
+  "mcp>=1.2.0,<2.0.0",
+  "PyYAML>=6.0.2",
+  "psutil>=6.0.0"
+]
 
 [build-system]
 requires = ["setuptools>=68"]
