@@ -5,7 +5,7 @@
 - Sin secretos por defecto.
 - Sin shell libre.
 
-## Herramientas iniciales
+## Herramientas actuales
 
 - `system_status`
 - `check_ports`
@@ -18,15 +18,26 @@
 - `validate_yaml`
 - `validate_json`
 - `docker_ps`
+- `container_inspect`
 - `docker_logs`
+- `docker_logs_filtered`
 - `docker_restart`
+- `git_status`
 
-## Notas de archivos grandes
+## Docker
+
+Las herramientas Docker usan `/var/run/docker.sock` vía HTTP Unix socket. No dependen del binario `docker` dentro del contenedor.
+
+`docker_restart` requiere contenedor en allowlist.
+
+## Git
+
+`git_status` es solo lectura y debe ejecutarse sobre un scope allowlisted.
+
+## Archivos grandes
 
 `read_file` mantiene límite de tamaño.
 
 `read_file_range` y `tail_file` leen por streaming y sirven para logs grandes sin cargar el archivo completo al contexto.
 
 `file_info` permite conocer `line_count` y construir un rango final sin adivinar.
-
-`list_files` oculta rutas/nombres sensibles definidos en denylist.

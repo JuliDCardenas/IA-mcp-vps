@@ -23,6 +23,10 @@ allowed_paths:
     root: /mnt/stacks
     writable: false
     extensions: [.py, .yml, .yaml, .json, .txt, .md, .conf, .sh, .log]
+  ia_mcp_vps:
+    root: /mnt/stacks/IA-mcp-vps
+    writable: true
+    extensions: [.py, .yml, .yaml, .json, .txt, .md, .conf, .sh, .toml]
   mosquitto:
     root: /mnt/stacks/mosquitto
     writable: true
@@ -43,26 +47,6 @@ allowed_paths:
     root: /mnt/stacks/prometheus
     writable: true
     extensions: [.yml, .yaml, .json, .txt, .md, .conf]
-  chatwoot:
-    root: /mnt/stacks/Chatwoot
-    writable: true
-    extensions: [.yml, .yaml, .json, .txt, .md, .conf]
-  evolution:
-    root: /mnt/stacks/evolution
-    writable: true
-    extensions: [.yml, .yaml, .json, .txt, .md, .conf]
-  evolution_api_pdp:
-    root: /mnt/stacks/EvolutionApiPdP
-    writable: true
-    extensions: [.yml, .yaml, .json, .txt, .md, .conf]
-  codeserver:
-    root: /mnt/stacks/codeserver
-    writable: true
-    extensions: [.yml, .yaml, .json, .txt, .md, .conf]
-  infra_backup:
-    root: /mnt/stacks/infra-backup
-    writable: true
-    extensions: [.yml, .yaml, .json, .txt, .md, .conf, .sh]
   host_logs:
     root: /mnt/host-logs
     writable: false
@@ -73,20 +57,27 @@ allowed_services:
   - traccar
   - docker
 
-# Ajustar con `docker ps --format '{{.Names}}'` en el VPS.
 allowed_containers:
+  - ia-mcp-vps
   - mosquitto
   - traccar
   - subscriber-json-osmand
+  - mqtt-subscriber
+  - mqtt-postgres
+  - traccar-postgres
   - homepage
-  - n8n
-  - prometheus
-  - chatwoot
-  - evolution
-  - codeserver
+  - n8n-n8n-1
+  - grafana
+  - prometheus_vpn
+  - node-exporter
+  - cadvisor
+  - code-server
   - ollama
+  - open-webui
 
 allowed_compose_projects:
+  ia_mcp_vps:
+    path: /mnt/stacks/IA-mcp-vps/docker-compose.yml
   mosquitto:
     path: /mnt/stacks/mosquitto/docker-compose.yml
   traccar:
@@ -97,11 +88,3 @@ allowed_compose_projects:
     path: /mnt/stacks/n8n/docker-compose.yml
   prometheus:
     path: /mnt/stacks/prometheus/docker-compose.yml
-  chatwoot:
-    path: /mnt/stacks/Chatwoot/docker-compose.yml
-  evolution:
-    path: /mnt/stacks/evolution/docker-compose.yml
-  evolution_api_pdp:
-    path: /mnt/stacks/EvolutionApiPdP/docker-compose.yml
-  codeserver:
-    path: /mnt/stacks/codeserver/docker-compose.yml

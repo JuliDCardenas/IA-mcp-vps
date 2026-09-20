@@ -16,6 +16,10 @@ connections.mcpServer_servidor_mcp_de_mi_vps
 
 No listar herramientas en cada sesión normal. Solo volver a listar si una llamada falla por herramienta inexistente/cambio de esquema o si se agregaron herramientas nuevas y se necesita refrescar.
 
+## Regla de reconexión en Notion
+
+Cuando se agreguen, eliminen o renombren herramientas, Notion puede mantener cacheada la lista anterior. Julián debe eliminar/recrear o refrescar la conexión MCP, ingresando de nuevo nombre, URL y Bearer token.
+
 ## Herramientas disponibles v1
 
 ### Sistema
@@ -27,21 +31,27 @@ No listar herramientas en cada sesión normal. Solo volver a listar si una llama
 
 - `list_files(scope, path='.')`: lista archivos no sensibles dentro de un scope.
 - `file_info(scope, path, count_lines=true)`: devuelve tamaño, modificación y conteo de líneas.
-- `read_file(scope, path)`: lee archivo pequeño; limitado por `max_file_bytes`.
-- `read_file_range(scope, path, start_line, end_line)`: lee rango de líneas de archivos grandes.
+- `read_file(scope, path)`: lee archivo UTF-8 dentro de un scope permitido, con límite de tamaño.
+- `read_file_range(scope, path, start_line, end_line)`: lee solo un rango de líneas.
 - `tail_file(scope, path, lines=100)`: últimas líneas de un archivo grande.
 - `search_text(scope, query, path='.')`: búsqueda textual con ripgrep.
+
+### Docker
+
+- `docker_ps`: lista contenedores usando Docker socket, no CLI.
+- `container_inspect(container)`: estado, health, mounts, puertos y restart policy de un contenedor permitido.
+- `docker_logs(container, lines=100)`: logs recientes de contenedor permitido.
+- `docker_logs_filtered(container, lines=200, grep=null, case_sensitive=false, since=null)`: logs filtrados.
+- `docker_restart(container)`: reinicia contenedor permitido.
+
+### Git
+
+- `git_status(scope, path='.')`: estado git read-only de un repo allowlisted.
 
 ### Validación
 
 - `validate_yaml(scope, path)`
 - `validate_json(scope, path)`
-
-### Docker
-
-- `docker_ps`
-- `docker_logs(container, lines=100)`
-- `docker_restart(container)`
 
 ## Defaults del proyecto GPS Tracker Logan
 
@@ -71,22 +81,18 @@ Uso preferido:
    - `search_text(scope='home_stacks', query='engine_off', path='tracker-noche-2026-08-20.log')`
    - `search_text(scope='home_stacks', query='sys/wake', path='tracker-noche-2026-08-20.log')`
 
-### Contenedores relevantes observados
+### Repo MCP
 
-- `mosquitto`
-- `subscriber-json-osmand`
-- `mqtt-subscriber`
-- `traccar`
-- `traccar-postgres`
-- `mqtt-postgres`
-- `homepage`
-- `n8n-n8n-1`
-- `grafana`
-- `prometheus_vpn`
-- `node-exporter`
-- `cadvisor`
+Scope:
 
-Ajustar `allowed_containers` en `config.yaml` cuando un nombre real no coincida.
+```txt
+ia_mcp_vps
+```
+
+Uso:
+
+- `git_status(scope='ia_mcp_vps')`
+- `read_file(scope='ia_mcp_vps', path='README.md')`
 
 ## Reglas de eficiencia
 
