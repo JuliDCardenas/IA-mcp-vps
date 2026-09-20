@@ -8,6 +8,11 @@ services:
     # Si tu usuario host tiene otro UID/GID, crea .env con MCP_UID/MCP_GID.
     user: "${MCP_UID:-1001}:${MCP_GID:-1001}"
 
+    # /var/run/docker.sock pertenece al grupo docker del host.
+    # En este VPS el grupo docker es GID 999. Si cambia, ajustar MCP_DOCKER_GID en .env.
+    group_add:
+      - "${MCP_DOCKER_GID:-999}"
+
     environment:
       IA_MCP_VPS_CONFIG: /config/config.yaml
       IA_MCP_VPS_TRANSPORT: http
