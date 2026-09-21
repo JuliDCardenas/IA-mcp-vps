@@ -23,30 +23,67 @@ allowed_paths:
     root: /mnt/stacks
     writable: false
     extensions: [.py, .yml, .yaml, .json, .txt, .md, .conf, .sh, .log]
+
   ia_mcp_vps:
     root: /mnt/stacks/IA-mcp-vps
     writable: true
     extensions: [.py, .yml, .yaml, .json, .txt, .md, .conf, .sh, .toml]
+
   mosquitto:
     root: /mnt/stacks/mosquitto
     writable: true
     extensions: [.py, .yml, .yaml, .json, .txt, .md, .conf, .sh]
+
   traccar:
     root: /mnt/stacks/traccar
     writable: true
     extensions: [.py, .yml, .yaml, .json, .txt, .md, .conf, .sh, .xml]
+
   homepage:
     root: /mnt/stacks/homepage
     writable: true
     extensions: [.yml, .yaml, .json, .txt, .md, .conf]
+
   n8n:
     root: /mnt/stacks/n8n
     writable: true
     extensions: [.yml, .yaml, .json, .txt, .md, .conf]
+
   prometheus:
     root: /mnt/stacks/prometheus
     writable: true
     extensions: [.yml, .yaml, .json, .txt, .md, .conf]
+
+  vpn:
+    root: /mnt/stacks/vpn
+    writable: true
+    extensions: [.yml, .yaml, .json, .txt, .md, .conf]
+
+  evolution_api:
+    root: /mnt/stacks/EvolutionApiPdP
+    writable: true
+    extensions: [.yml, .yaml, .json, .txt, .md, .conf]
+
+  codeserver:
+    root: /mnt/stacks/codeserver
+    writable: true
+    extensions: [.py, .yml, .yaml, .json, .txt, .md, .conf, .sh, .Dockerfile]
+
+  ollama:
+    root: /mnt/stacks/ollama
+    writable: true
+    extensions: [.yml, .yaml, .json, .txt, .md, .conf]
+
+  bases_de_datos:
+    root: /mnt/stacks/BasesDeDatos
+    writable: false
+    extensions: [.yml, .yaml, .json, .txt, .md, .conf, .sh, .sql, .log]
+
+  infra_backup:
+    root: /mnt/stacks/infra-backup
+    writable: false
+    extensions: [.yml, .yaml, .json, .txt, .md, .conf, .sh, .log]
+
   host_logs:
     root: /mnt/host-logs
     writable: false
@@ -65,12 +102,21 @@ allowed_containers:
   - mqtt-subscriber
   - mqtt-postgres
   - traccar-postgres
+  - mqtt-adminer
   - homepage
-  - n8n-n8n-1
-  - grafana
+  - dockerproxy
+  - wireguard
   - prometheus_vpn
+  - prometheus
   - node-exporter
   - cadvisor
+  - grafana
+  - n8n-n8n-1
+  - evolution_api
+  - evolution_postgres
+  - evolution_redis
+  - redis_db
+  - redis-commander
   - code-server
   - ollama
   - open-webui
@@ -83,22 +129,71 @@ allowed_compose_projects:
       - ia-mcp-vps
     services:
       - ia-mcp-vps
+
   mosquitto:
     path: /mnt/stacks/mosquitto/docker-compose.yml
+    container_names:
+      - mosquitto
+      - mqtt-subscriber
+      - mqtt-postgres
+      - mqtt-adminer
+      - subscriber-json-osmand
+
   traccar:
     path: /mnt/stacks/traccar/docker-compose.yml
+    container_names:
+      - traccar
+      - traccar-postgres
+
   homepage:
     path: /mnt/stacks/homepage/docker-compose.yml
+    container_names:
+      - homepage
+      - dockerproxy
+
   n8n:
     path: /mnt/stacks/n8n/docker-compose.yml
+    container_names:
+      - n8n-n8n-1
+
   prometheus:
     path: /mnt/stacks/prometheus/docker-compose.yml
+    container_names:
+      - prometheus
+      - grafana
+      - node-exporter
+      - cadvisor
+
+  vpn:
+    path: /mnt/stacks/vpn/docker-compose.yml
+    container_names:
+      - wireguard
+      - prometheus_vpn
+
+  evolution_api:
+    path: /mnt/stacks/EvolutionApiPdP/docker-compose.yml
+    container_names:
+      - evolution_api
+      - evolution_postgres
+      - evolution_redis
+
+  codeserver:
+    path: /mnt/stacks/codeserver/docker-compose.yml
+    container_names:
+      - code-server
+
+  ollama:
+    path: /mnt/stacks/ollama/docker-compose.yml
+    container_names:
+      - ollama
+      - open-webui
 
 allowed_http_targets:
   mcp_local:
     url: http://127.0.0.1:8787/mcp
   mcp_host:
     url: http://host.docker.internal:8787/mcp
+
   homepage_local:
     url: http://host.docker.internal:3001
   traccar_local:
@@ -107,3 +202,24 @@ allowed_http_targets:
     url: http://host.docker.internal:5678
   grafana_local:
     url: http://host.docker.internal:3000
+
+  cadvisor_local:
+    url: http://host.docker.internal:8080
+  node_exporter_local:
+    url: http://host.docker.internal:9100
+
+  mqtt_adminer_local:
+    url: http://host.docker.internal:8084
+  redis_commander_local:
+    url: http://host.docker.internal:8081
+
+  evolution_api_local:
+    url: http://host.docker.internal:8082
+
+  code_server_local:
+    url: http://host.docker.internal:8443
+
+  ollama_local:
+    url: http://host.docker.internal:11434
+  open_webui_local:
+    url: http://host.docker.internal:3002
