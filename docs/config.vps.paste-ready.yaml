@@ -1,0 +1,109 @@
+server:
+  name: IA MCP VPS
+  environment: docker
+
+security:
+  max_file_bytes: 200000
+  max_log_lines: 500
+  deny_paths:
+    - /root
+    - /etc/shadow
+    - /etc/sudoers
+    - /home/*/.ssh
+    - /mnt/stacks/.ssh
+    - /mnt/stacks/**/.ssh
+  deny_file_names:
+    - .env
+    - id_rsa
+    - id_ed25519
+    - authorized_keys
+
+allowed_paths:
+  home_stacks:
+    root: /mnt/stacks
+    writable: false
+    extensions: [.py, .yml, .yaml, .json, .txt, .md, .conf, .sh, .log]
+  ia_mcp_vps:
+    root: /mnt/stacks/IA-mcp-vps
+    writable: true
+    extensions: [.py, .yml, .yaml, .json, .txt, .md, .conf, .sh, .toml]
+  mosquitto:
+    root: /mnt/stacks/mosquitto
+    writable: true
+    extensions: [.py, .yml, .yaml, .json, .txt, .md, .conf, .sh]
+  traccar:
+    root: /mnt/stacks/traccar
+    writable: true
+    extensions: [.py, .yml, .yaml, .json, .txt, .md, .conf, .sh, .xml]
+  homepage:
+    root: /mnt/stacks/homepage
+    writable: true
+    extensions: [.yml, .yaml, .json, .txt, .md, .conf]
+  n8n:
+    root: /mnt/stacks/n8n
+    writable: true
+    extensions: [.yml, .yaml, .json, .txt, .md, .conf]
+  prometheus:
+    root: /mnt/stacks/prometheus
+    writable: true
+    extensions: [.yml, .yaml, .json, .txt, .md, .conf]
+  host_logs:
+    root: /mnt/host-logs
+    writable: false
+    extensions: [.log, .txt]
+
+allowed_services:
+  - mosquitto
+  - traccar
+  - docker
+
+allowed_containers:
+  - ia-mcp-vps
+  - mosquitto
+  - traccar
+  - subscriber-json-osmand
+  - mqtt-subscriber
+  - mqtt-postgres
+  - traccar-postgres
+  - homepage
+  - n8n-n8n-1
+  - grafana
+  - prometheus_vpn
+  - node-exporter
+  - cadvisor
+  - code-server
+  - ollama
+  - open-webui
+
+allowed_compose_projects:
+  ia_mcp_vps:
+    path: /mnt/stacks/IA-mcp-vps/docker-compose.yml
+    compose_project_name: ia-mcp-vps
+    container_names:
+      - ia-mcp-vps
+    services:
+      - ia-mcp-vps
+  mosquitto:
+    path: /mnt/stacks/mosquitto/docker-compose.yml
+  traccar:
+    path: /mnt/stacks/traccar/docker-compose.yml
+  homepage:
+    path: /mnt/stacks/homepage/docker-compose.yml
+  n8n:
+    path: /mnt/stacks/n8n/docker-compose.yml
+  prometheus:
+    path: /mnt/stacks/prometheus/docker-compose.yml
+
+allowed_http_targets:
+  mcp_local:
+    url: http://127.0.0.1:8787/mcp
+  mcp_host:
+    url: http://host.docker.internal:8787/mcp
+  homepage_local:
+    url: http://host.docker.internal:3001
+  traccar_local:
+    url: http://host.docker.internal:8083
+  n8n_local:
+    url: http://host.docker.internal:5678
+  grafana_local:
+    url: http://host.docker.internal:3000
