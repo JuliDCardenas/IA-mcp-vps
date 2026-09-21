@@ -8,11 +8,12 @@ from typing import Any
 from dari_mcp_vps.security import SecurityError
 
 DEFAULT_TARGETS = {
-    "mcp_local": {"url": "http://127.0.0.1:8787"},
-    "homepage_local": {"url": "http://127.0.0.1:3001"},
-    "traccar_local": {"url": "http://127.0.0.1:8083"},
-    "n8n_local": {"url": "http://127.0.0.1:5678"},
-    "grafana_local": {"url": "http://127.0.0.1:3000"},
+    "mcp_local": {"url": "http://127.0.0.1:8787/mcp"},
+    "mcp_host": {"url": "http://host.docker.internal:8787/mcp"},
+    "homepage_local": {"url": "http://host.docker.internal:3001"},
+    "traccar_local": {"url": "http://host.docker.internal:8083"},
+    "n8n_local": {"url": "http://host.docker.internal:5678"},
+    "grafana_local": {"url": "http://host.docker.internal:3000"},
 }
 
 

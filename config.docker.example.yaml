@@ -78,6 +78,8 @@ allowed_containers:
 allowed_compose_projects:
   ia_mcp_vps:
     path: /mnt/stacks/IA-mcp-vps/docker-compose.yml
+    compose_project_name: ia-mcp-vps
+    container_names: [ia-mcp-vps]
     services: [ia-mcp-vps]
   mosquitto:
     path: /mnt/stacks/mosquitto/docker-compose.yml
@@ -92,12 +94,14 @@ allowed_compose_projects:
 
 allowed_http_targets:
   mcp_local:
-    url: http://127.0.0.1:8787
+    url: http://127.0.0.1:8787/mcp
+  mcp_host:
+    url: http://host.docker.internal:8787/mcp
   homepage_local:
-    url: http://127.0.0.1:3001
+    url: http://host.docker.internal:3001
   traccar_local:
-    url: http://127.0.0.1:8083
+    url: http://host.docker.internal:8083
   n8n_local:
-    url: http://127.0.0.1:5678
+    url: http://host.docker.internal:5678
   grafana_local:
-    url: http://127.0.0.1:3000
+    url: http://host.docker.internal:3000

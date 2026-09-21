@@ -38,20 +38,26 @@ def _truncate(text: str, limit: int = 20000) -> str:
 
 def _compose_project_names(project: str, cfg: dict[str, Any]) -> set[str]:
     names = {project}
-    explicit = cfg.get("compose_project_name") or cfg.get("name")
-    if explicit:
-        names.add(str(explicit))
+    for key in ("compose_project_name", "name"):
+        value = cfg.get(key)
+        if value:
+            names.add(str(value))
+    # Common Compose normalization fallback: directory/repo style names often swap '-' and '_'.
+    names.add(project.replace("_", "-"))
+    names.add(project.replace("-", "_"))
     return names
 
 
 def _containers_for_project(project: str, project_cfg: dict[str, Any]) -> list[dict[str, Any]]:
     project_names = _compose_project_names(project, project_cfg)
+    explicit_container_names = set(project_cfg.get("container_names", []))
     containers = _json("GET", "/containers/json?all=1")
     out = []
     for container in containers:
         labels = container.get("Labels") or {}
+        names = [str(n).lstrip("/") for n in container.get("Names", [])]
         compose_project = labels.get("com.docker.compose.project")
-        if compose_project in project_names:
+        if compose_project in project_names or explicit_container_names.intersection(names):
             out.append(container)
     return out
 
@@ -84,7 +90,7 @@ def register_compose_tools(mcp: Any, app_config: Any) -> None:
 
     @mcp.tool()
     def docker_compose_ps(project: str) -> dict[str, Any]:
-        """Return Docker Compose project containers using Docker labels. Does not require docker CLI."""
+        """Return Docker Compose project containers using labels and configured container_names. Does not require docker CLI."""
         project_cfg = _project_config(app_config.raw, project)
         containers = _containers_for_project(project, project_cfg)
         rows = []
@@ -104,7 +110,7 @@ def register_compose_tools(mcp: Any, app_config: Any) -> None:
 
     @mcp.tool()
     def docker_compose_logs(project: str, service: str | None = None, lines: int = 100, grep: str | None = None, case_sensitive: bool = False) -> str:
-        """Return recent logs from an allowlisted Docker Compose project/service using Docker labels."""
+        """Return recent logs from an allowlisted Docker Compose project/service using labels/container_names."""
         project_cfg = _project_config(app_config.raw, project)
         if service:
             allowed_services = set(project_cfg.get("services", []))
@@ -112,7 +118,7 @@ def register_compose_tools(mcp: Any, app_config: Any) -> None:
                 raise SecurityError(f"Compose service not allowed for {project}: {service}")
         containers = _containers_for_project(project, project_cfg)
         if service:
-            containers = [c for c in containers if (c.get("Labels") or {}).get("com.docker.compose.service") == service]
+            containers = [c for c in containers if (c.get("Labels") or {}).get("com.docker.compose.service") == service or service in [str(n).lstrip("/") for n in c.get("Names", [])]]
         tail = min(max(1, int(lines)), app_config.max_log_lines)
         chunks = []
         for c in containers:
