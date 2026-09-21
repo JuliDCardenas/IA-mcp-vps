@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import json
-import subprocess
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from dari_mcp_vps.security import SecurityError
+from dari_mcp_vps.tools.docker_tools import _json, _docker_request, _demux_docker_logs
 
 
 def _project_config(config: dict[str, Any], project: str) -> dict[str, Any]:
@@ -25,12 +26,8 @@ def _compose_path(config: dict[str, Any], project: str) -> Path:
     return path
 
 
-def _run(cmd: list[str], cwd: Path | None = None, timeout: int = 45) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, timeout=timeout, check=False)
-
-
-def _compose_cmd(compose_file: Path, args: list[str]) -> list[str]:
-    return ["docker", "compose", "-f", str(compose_file), *args]
+def _load_compose(compose_file: Path) -> dict[str, Any]:
+    return yaml.safe_load(compose_file.read_text(encoding="utf-8")) or {}
 
 
 def _truncate(text: str, limit: int = 20000) -> str:
@@ -39,71 +36,95 @@ def _truncate(text: str, limit: int = 20000) -> str:
     return text[:limit] + "\n...[truncated]"
 
 
+def _compose_project_names(project: str, cfg: dict[str, Any]) -> set[str]:
+    names = {project}
+    explicit = cfg.get("compose_project_name") or cfg.get("name")
+    if explicit:
+        names.add(str(explicit))
+    return names
+
+
+def _containers_for_project(project: str, project_cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    project_names = _compose_project_names(project, project_cfg)
+    containers = _json("GET", "/containers/json?all=1")
+    out = []
+    for container in containers:
+        labels = container.get("Labels") or {}
+        compose_project = labels.get("com.docker.compose.project")
+        if compose_project in project_names:
+            out.append(container)
+    return out
+
+
+def _container_name(container: dict[str, Any]) -> str:
+    names = container.get("Names") or []
+    if names:
+        return str(names[0]).lstrip("/")
+    return container.get("Id", "")[:12]
+
+
 def register_compose_tools(mcp: Any, app_config: Any) -> None:
     @mcp.tool()
     def docker_compose_config(project: str) -> dict[str, Any]:
-        """Validate an allowlisted Docker Compose project and return safe summary."""
+        """Validate an allowlisted Docker Compose YAML structurally and return safe summary. Does not require docker CLI."""
         compose_file = _compose_path(app_config.raw, project)
-        proc = _run(_compose_cmd(compose_file, ["config", "--format", "json"]), cwd=compose_file.parent)
-        if proc.returncode != 0:
-            return {"ok": False, "project": project, "compose_file": str(compose_file), "error": _truncate(proc.stderr or proc.stdout)}
         try:
-            data = json.loads(proc.stdout)
-        except Exception:
-            return {"ok": True, "project": project, "compose_file": str(compose_file), "raw": _truncate(proc.stdout)}
-        services = sorted((data.get("services") or {}).keys())
-        volumes = sorted((data.get("volumes") or {}).keys())
-        networks = sorted((data.get("networks") or {}).keys())
-        return {"ok": True, "project": project, "compose_file": str(compose_file), "services": services, "volumes": volumes, "networks": networks}
+            data = _load_compose(compose_file)
+        except Exception as exc:
+            return {"ok": False, "project": project, "compose_file": str(compose_file), "error": str(exc)}
+        services_obj = data.get("services") or {}
+        volumes_obj = data.get("volumes") or {}
+        networks_obj = data.get("networks") or {}
+        if not isinstance(services_obj, dict):
+            return {"ok": False, "project": project, "compose_file": str(compose_file), "error": "services must be a mapping"}
+        services = sorted(services_obj.keys())
+        volumes = sorted(volumes_obj.keys()) if isinstance(volumes_obj, dict) else []
+        networks = sorted(networks_obj.keys()) if isinstance(networks_obj, dict) else []
+        return {"ok": True, "project": project, "compose_file": str(compose_file), "services": services, "volumes": volumes, "networks": networks, "note": "structural YAML validation only; no Docker interpolation"}
 
     @mcp.tool()
     def docker_compose_ps(project: str) -> dict[str, Any]:
-        """Return Docker Compose ps for an allowlisted project."""
-        compose_file = _compose_path(app_config.raw, project)
-        proc = _run(_compose_cmd(compose_file, ["ps", "--format", "json"]), cwd=compose_file.parent)
-        if proc.returncode != 0:
-            return {"ok": False, "project": project, "compose_file": str(compose_file), "error": _truncate(proc.stderr or proc.stdout)}
+        """Return Docker Compose project containers using Docker labels. Does not require docker CLI."""
+        project_cfg = _project_config(app_config.raw, project)
+        containers = _containers_for_project(project, project_cfg)
         rows = []
-        text = proc.stdout.strip()
-        if text:
-            # Compose may output JSON lines or a JSON array depending on version.
-            try:
-                parsed = json.loads(text)
-                rows = parsed if isinstance(parsed, list) else [parsed]
-            except Exception:
-                for line in text.splitlines():
-                    try:
-                        rows.append(json.loads(line))
-                    except Exception:
-                        rows.append({"raw": line})
-        safe_rows = []
-        for row in rows:
-            safe_rows.append({
-                "name": row.get("Name") or row.get("Name".lower()),
-                "service": row.get("Service") or row.get("Service".lower()),
-                "state": row.get("State") or row.get("State".lower()),
-                "status": row.get("Status") or row.get("Status".lower()),
-                "publishers": row.get("Publishers") or row.get("Publishers".lower()),
+        for c in containers:
+            labels = c.get("Labels") or {}
+            rows.append({
+                "name": _container_name(c),
+                "service": labels.get("com.docker.compose.service"),
+                "project": labels.get("com.docker.compose.project"),
+                "id": c.get("Id", "")[:12],
+                "image": c.get("Image"),
+                "state": c.get("State"),
+                "status": c.get("Status"),
+                "ports": c.get("Ports", []),
             })
-        return {"ok": True, "project": project, "compose_file": str(compose_file), "containers": safe_rows}
+        return {"ok": True, "project": project, "containers": rows}
 
     @mcp.tool()
     def docker_compose_logs(project: str, service: str | None = None, lines: int = 100, grep: str | None = None, case_sensitive: bool = False) -> str:
-        """Return recent logs from an allowlisted Docker Compose project/service."""
-        compose_file = _compose_path(app_config.raw, project)
+        """Return recent logs from an allowlisted Docker Compose project/service using Docker labels."""
         project_cfg = _project_config(app_config.raw, project)
         if service:
             allowed_services = set(project_cfg.get("services", []))
             if allowed_services and service not in allowed_services:
                 raise SecurityError(f"Compose service not allowed for {project}: {service}")
-        tail = min(max(1, int(lines)), app_config.max_log_lines)
-        args = ["logs", "--no-color", "--tail", str(tail)]
+        containers = _containers_for_project(project, project_cfg)
         if service:
-            args.append(service)
-        proc = _run(_compose_cmd(compose_file, args), cwd=compose_file.parent, timeout=60)
-        if proc.returncode != 0:
-            raise RuntimeError(proc.stderr.strip() or proc.stdout.strip())
-        text = proc.stdout
+            containers = [c for c in containers if (c.get("Labels") or {}).get("com.docker.compose.service") == service]
+        tail = min(max(1, int(lines)), app_config.max_log_lines)
+        chunks = []
+        for c in containers:
+            cid = c.get("Id")
+            name = _container_name(c)
+            status, _headers, body = _docker_request("GET", f"/containers/{cid}/logs?stdout=1&stderr=1&timestamps=1&tail={tail}")
+            if status >= 400:
+                continue
+            text = _demux_docker_logs(body)
+            for line in text.splitlines():
+                chunks.append(f"[{name}] {line}")
+        text = "\n".join(chunks)
         if grep:
             needle = grep if case_sensitive else grep.lower()
             filtered = []

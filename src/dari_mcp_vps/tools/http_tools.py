@@ -7,9 +7,17 @@ from typing import Any
 
 from dari_mcp_vps.security import SecurityError
 
+DEFAULT_TARGETS = {
+    "mcp_local": {"url": "http://127.0.0.1:8787"},
+    "homepage_local": {"url": "http://127.0.0.1:3001"},
+    "traccar_local": {"url": "http://127.0.0.1:8083"},
+    "n8n_local": {"url": "http://127.0.0.1:5678"},
+    "grafana_local": {"url": "http://127.0.0.1:3000"},
+}
+
 
 def _target(config: dict[str, Any], name: str) -> dict[str, Any]:
-    targets = config.get("allowed_http_targets", {})
+    targets = {**DEFAULT_TARGETS, **(config.get("allowed_http_targets", {}) or {})}
     if name not in targets:
         raise SecurityError(f"HTTP target not allowed: {name}")
     value = targets[name]
@@ -33,28 +41,11 @@ def register_http_tools(mcp: Any, app_config: Any) -> None:
             with urllib.request.urlopen(req, timeout=timeout_s) as resp:
                 body = resp.read(max_bytes)
                 latency_ms = round((time.monotonic() - started) * 1000, 2)
-                return {
-                    "ok": 200 <= resp.status < 400,
-                    "target": target,
-                    "url": url,
-                    "status": resp.status,
-                    "reason": resp.reason,
-                    "latency_ms": latency_ms,
-                    "headers": {k.lower(): v for k, v in resp.headers.items() if k.lower() in {"content-type", "server", "location"}},
-                    "body_preview": body.decode("utf-8", errors="replace"),
-                }
+                return {"ok": 200 <= resp.status < 400, "target": target, "url": url, "status": resp.status, "reason": resp.reason, "latency_ms": latency_ms, "headers": {k.lower(): v for k, v in resp.headers.items() if k.lower() in {"content-type", "server", "location"}}, "body_preview": body.decode("utf-8", errors="replace")}
         except urllib.error.HTTPError as exc:
             body = exc.read(max_bytes)
             latency_ms = round((time.monotonic() - started) * 1000, 2)
-            return {
-                "ok": False,
-                "target": target,
-                "url": url,
-                "status": exc.code,
-                "reason": exc.reason,
-                "latency_ms": latency_ms,
-                "body_preview": body.decode("utf-8", errors="replace"),
-            }
+            return {"ok": False, "target": target, "url": url, "status": exc.code, "reason": exc.reason, "latency_ms": latency_ms, "body_preview": body.decode("utf-8", errors="replace")}
         except Exception as exc:
             latency_ms = round((time.monotonic() - started) * 1000, 2)
             return {"ok": False, "target": target, "url": url, "error": str(exc), "latency_ms": latency_ms}
