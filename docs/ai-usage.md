@@ -26,6 +26,7 @@ Cuando se agreguen, eliminen o renombren herramientas, Notion puede mantener cac
 
 - `system_status`: salud general del VPS.
 - `check_ports`: prueba puertos TCP desde el VPS.
+- `http_probe(target)`: prueba endpoints HTTP allowlisted.
 
 ### Archivos/logs
 
@@ -44,6 +45,12 @@ Cuando se agreguen, eliminen o renombren herramientas, Notion puede mantener cac
 - `docker_logs_filtered(container, lines=200, grep=null, case_sensitive=false, since=null)`: logs filtrados.
 - `docker_restart(container)`: reinicia contenedor permitido.
 
+### Compose
+
+- `docker_compose_config(project)`: valida compose allowlisted y devuelve servicios/volúmenes/redes.
+- `docker_compose_ps(project)`: estado de contenedores de un proyecto compose allowlisted.
+- `docker_compose_logs(project, service=null, lines=100, grep=null)`: logs de proyecto/servicio compose.
+
 ### Git
 
 - `git_status(scope, path='.')`: estado git read-only de un repo allowlisted.
@@ -57,37 +64,18 @@ Cuando se agreguen, eliminen o renombren herramientas, Notion puede mantener cac
 
 ### Log MQTT principal de campo
 
-Scope:
-
-```txt
-home_stacks
-```
-
-Archivo:
-
-```txt
-tracker-noche-2026-08-20.log
-```
+Scope: `home_stacks`
+Archivo: `tracker-noche-2026-08-20.log`
 
 Uso preferido:
 
-1. Para saber el final del archivo:
-   - `tail_file(scope='home_stacks', path='tracker-noche-2026-08-20.log', lines=40)`
-2. Si `tail_file` no aparece todavía en Notion por caché de herramientas:
-   - `file_info(...)` para obtener `line_count`.
-   - `read_file_range(..., start_line=line_count-40, end_line=line_count)`.
-3. Para eventos puntuales:
-   - `search_text(scope='home_stacks', query='parked_sleep', path='tracker-noche-2026-08-20.log')`
-   - `search_text(scope='home_stacks', query='engine_off', path='tracker-noche-2026-08-20.log')`
-   - `search_text(scope='home_stacks', query='sys/wake', path='tracker-noche-2026-08-20.log')`
+1. `tail_file(scope='home_stacks', path='tracker-noche-2026-08-20.log', lines=40)`
+2. Si `tail_file` no aparece todavía en Notion por caché de herramientas: `file_info` + `read_file_range`.
+3. Para eventos puntuales: `search_text` con `parked_sleep`, `engine_off`, `sys/wake`, etc.
 
 ### Repo MCP
 
-Scope:
-
-```txt
-ia_mcp_vps
-```
+Scope: `ia_mcp_vps`
 
 Uso:
 

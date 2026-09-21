@@ -10,6 +10,8 @@ from dari_mcp_vps.tools.filesystem import register_filesystem_tools
 from dari_mcp_vps.tools.validators import register_validator_tools
 from dari_mcp_vps.tools.docker_tools import register_docker_tools
 from dari_mcp_vps.tools.git_tools import register_git_tools
+from dari_mcp_vps.tools.compose_tools import register_compose_tools
+from dari_mcp_vps.tools.http_tools import register_http_tools
 
 CONFIG = load_config()
 mcp = FastMCP(CONFIG.raw.get("server", {}).get("name", "IA MCP VPS"))
@@ -19,6 +21,8 @@ register_filesystem_tools(mcp, CONFIG)
 register_validator_tools(mcp, CONFIG)
 register_docker_tools(mcp, CONFIG)
 register_git_tools(mcp, CONFIG)
+register_compose_tools(mcp, CONFIG)
+register_http_tools(mcp, CONFIG)
 
 
 def main() -> None:

@@ -9,6 +9,7 @@
 
 - `system_status`
 - `check_ports`
+- `http_probe`
 - `list_files`
 - `file_info`
 - `read_file`
@@ -22,6 +23,9 @@
 - `docker_logs`
 - `docker_logs_filtered`
 - `docker_restart`
+- `docker_compose_config`
+- `docker_compose_ps`
+- `docker_compose_logs`
 - `git_status`
 
 ## Docker
@@ -29,6 +33,14 @@
 Las herramientas Docker usan `/var/run/docker.sock` vía HTTP Unix socket. No dependen del binario `docker` dentro del contenedor.
 
 `docker_restart` requiere contenedor en allowlist.
+
+## Compose
+
+Las herramientas Compose sí usan el binario `docker compose`; dependen del socket Docker y de que el binario esté disponible en la imagen.
+
+## HTTP
+
+`http_probe` solo acepta targets definidos en `allowed_http_targets` para evitar SSRF.
 
 ## Git
 

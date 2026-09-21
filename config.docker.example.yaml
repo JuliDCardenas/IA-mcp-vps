@@ -78,6 +78,7 @@ allowed_containers:
 allowed_compose_projects:
   ia_mcp_vps:
     path: /mnt/stacks/IA-mcp-vps/docker-compose.yml
+    services: [ia-mcp-vps]
   mosquitto:
     path: /mnt/stacks/mosquitto/docker-compose.yml
   traccar:
@@ -88,3 +89,15 @@ allowed_compose_projects:
     path: /mnt/stacks/n8n/docker-compose.yml
   prometheus:
     path: /mnt/stacks/prometheus/docker-compose.yml
+
+allowed_http_targets:
+  mcp_local:
+    url: http://127.0.0.1:8787
+  homepage_local:
+    url: http://127.0.0.1:3001
+  traccar_local:
+    url: http://127.0.0.1:8083
+  n8n_local:
+    url: http://127.0.0.1:5678
+  grafana_local:
+    url: http://127.0.0.1:3000
