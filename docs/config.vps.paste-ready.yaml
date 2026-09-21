@@ -99,6 +99,7 @@ allowed_containers:
   - mosquitto
   - traccar
   - subscriber-json-osmand
+  - tracker-diagnostics
   - mqtt-subscriber
   - mqtt-postgres
   - traccar-postgres
@@ -138,6 +139,7 @@ allowed_compose_projects:
       - mqtt-postgres
       - mqtt-adminer
       - subscriber-json-osmand
+      - tracker-diagnostics
 
   traccar:
     path: /mnt/stacks/traccar/docker-compose.yml
