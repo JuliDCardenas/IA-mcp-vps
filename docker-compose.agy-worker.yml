@@ -1,7 +1,8 @@
-name: ia-mcp-vps-agy-worker
+name: agy-worker
 
 services:
   agy-worker:
+    image: ia-mcp-vps-agy-worker:local
     build:
       context: .
       dockerfile: docker/agy-worker/Dockerfile
