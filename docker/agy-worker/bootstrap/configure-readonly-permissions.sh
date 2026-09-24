@@ -5,6 +5,7 @@ readonly SETTINGS_DIR="${HOME}/.gemini/antigravity-cli"
 readonly SETTINGS_FILE="${SETTINGS_DIR}/settings.json"
 readonly TMP_FILE="$(mktemp)"
 readonly RULES=(
+  'read_file(.)'
   'read_file(/workspace/IA-mcp-vps)'
   'read_file(/home/agy/.gemini/antigravity-cli/builtin/skills)'
 )
