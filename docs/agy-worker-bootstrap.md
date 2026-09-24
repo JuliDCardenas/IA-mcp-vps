@@ -79,13 +79,13 @@ Expected properties:
 ## Verification
 
 ```bash
-docker inspect agy-worker --format '{{json .Mounts}}'
-docker inspect agy-worker --format '{{json .HostConfig.Binds}}'
+docker inspect agy-worker --format '{{range .Mounts}}{{println .Type .Destination}}{{end}}'
 docker inspect agy-worker --format '{{json .HostConfig.CapDrop}}'
 docker inspect agy-worker --format '{{json .HostConfig.SecurityOpt}}'
+docker inspect agy-worker --format '{{.HostConfig.ReadonlyRootfs}}'
 ```
 
-The binds value must be `null`; mounts must contain only Docker named volumes.
+All reported mount types must be `volume`; no entry may have type `bind`. Some Docker versions also list named-volume declarations under `HostConfig.Binds`, so that field alone is not a reliable host-bind test.
 
 ## Stop and remove the container
 
