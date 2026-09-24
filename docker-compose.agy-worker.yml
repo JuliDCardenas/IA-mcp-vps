@@ -1,0 +1,42 @@
+services:
+  agy-worker:
+    build:
+      context: .
+      dockerfile: docker/agy-worker/Dockerfile
+    container_name: agy-worker
+    restart: unless-stopped
+    init: true
+    user: "10001:10001"
+
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 2g
+    cpus: 2.0
+
+    environment:
+      HOME: /home/agy
+      PATH: /home/agy/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+
+    volumes:
+      - agy_home:/home/agy
+      - agy_workspace:/workspace
+      - coding_jobs:/var/lib/coding-jobs
+
+    healthcheck:
+      test: ["CMD", "agy", "--version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  agy_home:
+  agy_workspace:
+  coding_jobs:
