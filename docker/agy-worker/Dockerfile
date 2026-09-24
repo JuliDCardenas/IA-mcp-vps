@@ -36,9 +36,11 @@ USER agy
 ENV HOME=/home/agy
 ENV PATH=/home/agy/.local/bin:${PATH}
 ENV PYTHONPYCACHEPREFIX=/tmp/agy-pycache
+ENV GIT_CONFIG_COUNT=1
+ENV GIT_CONFIG_KEY_0=status.showUntrackedFiles
+ENV GIT_CONFIG_VALUE_0=all
 
-RUN git config --global status.showUntrackedFiles all \
-    && curl -fsSL "${AGY_INSTALL_URL}" -o /tmp/install-agy.sh \
+RUN curl -fsSL "${AGY_INSTALL_URL}" -o /tmp/install-agy.sh \
     && bash /tmp/install-agy.sh --dir /home/agy/.local/bin \
     && rm -f /tmp/install-agy.sh \
     && agy --version \
