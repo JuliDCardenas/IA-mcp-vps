@@ -29,7 +29,7 @@ services:
 
     volumes:
       - agy_home:/home/agy
-      - agy_workspace:/workspace
+      - agy_workspace:/workspace:ro
       - coding_jobs:/var/lib/coding-jobs
 
     healthcheck:
@@ -38,6 +38,31 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
+
+  repo-seed:
+    image: ia-mcp-vps-agy-worker:local
+    profiles:
+      - seed
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      HOME: /home/agy
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+    volumes:
+      - agy_workspace:/workspace
+    command:
+      - bash
+      - -lc
+      - |
+        set -euo pipefail
+        rm -rf /workspace/IA-mcp-vps
+        git clone --depth 1 --branch main https://github.com/JuliDCardenas/IA-mcp-vps.git /workspace/IA-mcp-vps
+        git -C /workspace/IA-mcp-vps status --short --branch
 
 volumes:
   agy_home:
