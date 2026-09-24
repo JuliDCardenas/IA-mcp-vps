@@ -11,7 +11,12 @@ from typing import Any
 DOCKER_SOCK = "/var/run/docker.sock"
 WORKER_CONTAINER = "agy-worker"
 JOB_ID_RE = re.compile(r"^job_[0-9a-f]{32}$")
+ARTIFACT_PATH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 TERMINAL_STATES = {"NOTION_REVIEW", "FAILED", "CANCELLED", "EXPIRED"}
+TASK_SCRIPTS = {
+    "audit": "/opt/agy-job/run-job.sh",
+    "implement": "/opt/agy-job/run-implementation-job.sh",
+}
 
 
 def _decode_chunked(data: bytes) -> bytes:
@@ -129,6 +134,20 @@ def _validate_job_id(job_id: str) -> str:
     return job_id
 
 
+def _validate_artifact_path(path: str) -> str:
+    if (
+        not path
+        or len(path) > 240
+        or path.startswith("/")
+        or ".." in path.split("/")
+        or path == ".git"
+        or path.startswith(".git/")
+        or not ARTIFACT_PATH_RE.fullmatch(path)
+    ):
+        raise ValueError("Invalid artifact path")
+    return path
+
+
 def _read_text(job_id: str, filename: str) -> str:
     _validate_job_id(job_id)
     return _exec(["cat", f"/var/lib/coding-jobs/{job_id}/{filename}"], detach=False)
@@ -177,11 +196,11 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
         constraints: list[str] | None = None,
         base_branch: str = "main",
     ) -> dict[str, Any]:
-        """Create a bounded asynchronous read-only Agy audit job."""
+        """Create a bounded asynchronous Agy audit or isolated implementation job."""
         if repository != "ia_mcp_vps":
             raise ValueError("Only repository alias ia_mcp_vps is allowed")
-        if task_type != "audit":
-            raise ValueError("Only task_type audit is allowed")
+        if task_type not in TASK_SCRIPTS:
+            raise ValueError("task_type must be audit or implement")
         if base_branch != "main":
             raise ValueError("Only base_branch main is allowed")
         goal = goal.strip()
@@ -203,8 +222,8 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
             "base_branch": base_branch,
         }
         encoded = base64.urlsafe_b64encode(json.dumps(request).encode("utf-8")).decode("ascii")
-        _exec(["/opt/agy-job/run-job.sh", job_id, encoded], detach=True)
-        return {"job_id": job_id, "status": "CREATED", "repository": repository}
+        _exec([TASK_SCRIPTS[task_type], job_id, encoded], detach=True)
+        return {"job_id": job_id, "status": "CREATED", "repository": repository, "task_type": task_type}
 
     @mcp.tool()
     def coding_job_status(job_id: str) -> dict[str, Any]:
@@ -253,3 +272,23 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
             "error": status.get("error"),
             "diagnostic": diagnostic,
         }
+
+    @mcp.tool()
+    def coding_job_changes(job_id: str) -> dict[str, Any]:
+        """Return the validated changed-file manifest for an implementation job."""
+        status = status_payload(job_id)
+        if status.get("status") != "NOTION_REVIEW" or status.get("task_type") != "implement":
+            raise ValueError("Implementation job is not ready for review")
+        manifest = _read_json(job_id, "manifest.json")
+        return {"job_id": job_id, **manifest}
+
+    @mcp.tool()
+    def coding_job_artifact(job_id: str, path: str) -> dict[str, Any]:
+        """Return one validated changed text file from an isolated implementation job."""
+        status = status_payload(job_id)
+        if status.get("status") != "NOTION_REVIEW" or status.get("task_type") != "implement":
+            raise ValueError("Implementation job is not ready for review")
+        clean_path = _validate_artifact_path(path)
+        encoded = base64.b64encode(clean_path.encode("utf-8")).decode("ascii")
+        content = _exec(["/opt/agy-job/read-artifact.sh", job_id, encoded], detach=False)
+        return {"job_id": job_id, "path": clean_path, "content": content}

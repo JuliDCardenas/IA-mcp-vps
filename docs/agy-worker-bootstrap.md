@@ -1,63 +1,46 @@
-# Agy worker bootstrap
+# Agy worker
 
-## Purpose
+## Propósito
 
-Run Antigravity CLI in an isolated container before implementing the asynchronous coding-job bridge.
+Ejecutar Antigravity CLI dentro de un contenedor aislado para trabajos asíncronos de auditoría e implementación. Agy analiza contexto acotado y devuelve resultados estructurados; no controla GitHub, Docker ni producción.
 
-This bootstrap does **not** expose an MCP tool, clone a repository, execute a coding job, or deploy application changes.
+## Límite de seguridad
 
-## Security boundary
+El worker tiene:
 
-The worker intentionally has:
+- usuario no root `10001:10001`;
+- root filesystem read-only;
+- todas las capabilities eliminadas;
+- `no-new-privileges`;
+- sin Docker socket ni binds del host;
+- sin puertos publicados;
+- `/workspace` como volumen read-only;
+- `/home/agy` para perfil OAuth;
+- `/var/lib/coding-jobs` para estado, clones temporales y resultados;
+- límites de procesos, memoria y CPU.
 
-- no Docker socket;
-- no host bind mounts;
-- no access to `/home/ubuntu`, `/mnt/stacks`, `/config`, SSH keys, or `.env` files;
-- a non-root UID/GID (`10001:10001`);
-- a read-only root filesystem;
-- all Linux capabilities dropped;
-- `no-new-privileges` enabled;
-- bounded processes, memory, and CPU;
-- dedicated named volumes for the Agy profile, workspace, and future job data.
+La red saliente continúa habilitada para Agy y para obtener snapshots públicos. Debe restringirse cuando se conozcan todos los endpoints requeridos.
 
-The default Compose network still permits outbound traffic. Restrict egress in a later hardening step after the required Google and GitHub endpoints are verified.
-
-## Supported host
-
-The initial target is the VPS confirmed as Linux `aarch64` with Docker Compose `v5.4.0`. The official installer advertises native Linux support and detects the platform during the image build. A failed ARM64 download must stop the build; do not substitute an unofficial binary.
-
-## Build without starting
+## Construcción y arranque
 
 ```bash
 git pull --ff-only
-docker compose -f docker-compose.agy-worker.yml build --no-cache agy-worker
-```
-
-Review the build output. It must finish with a successful `agy --version` check.
-
-## Start the isolated worker
-
-```bash
-docker compose -f docker-compose.agy-worker.yml up -d agy-worker
+docker compose -f docker-compose.agy-worker.yml build agy-worker
+docker compose -f docker-compose.agy-worker.yml up -d --force-recreate agy-worker
 docker compose -f docker-compose.agy-worker.yml ps
-docker compose -f docker-compose.agy-worker.yml exec agy-worker agy --version
 ```
 
-## Authenticate once
+La construcción debe finalizar con `agy --version` exitoso.
 
-Start an interactive session:
+## Autenticación inicial
 
 ```bash
 docker compose -f docker-compose.agy-worker.yml exec agy-worker agy
 ```
 
-On a remote server, Agy should print an authorization URL. Open it locally, authenticate with the approved Google account, and paste the returned authorization code into the terminal. Never paste the code, cached profile, or tokens into Git, Notion, logs, or chat.
+Abrir localmente la URL de autorización y completar OAuth. No copiar códigos, tokens o perfil cacheado a Git, Notion, logs o chat. El perfil persiste en el volumen `agy_home`.
 
-The profile is retained in the `agy_home` named volume.
-
-## Headless smoke test
-
-After authentication:
+## Smoke test headless
 
 ```bash
 docker compose -f docker-compose.agy-worker.yml exec agy-worker \
@@ -68,39 +51,43 @@ docker compose -f docker-compose.agy-worker.yml exec agy-worker \
   --print-timeout 2m
 ```
 
-Expected properties:
+Nunca usar `--dangerously-skip-permissions`.
 
-- process exits successfully;
-- stdout is one JSON envelope;
-- `structured_output.ok` is `true`;
-- no approval bypass flag is used;
-- no host path becomes visible.
+## Modelo de ejecución
 
-## Verification
+### Auditoría
+
+El script fijo empaqueta un contexto textual limitado desde `/workspace/IA-mcp-vps`. Agy no necesita invocar `read_file` en headless.
+
+### Implementación
+
+El script fijo clona el `main` actual en el directorio del trabajo, entrega contexto a Agy, valida su salida estructurada y aplica los reemplazos únicamente dentro del clon. El resultado conserva el SHA base, manifiesto, hashes y artefactos para revisión.
+
+## Verificación
 
 ```bash
-docker inspect agy-worker --format '{{range .Mounts}}{{println .Type .Destination}}{{end}}'
+docker inspect agy-worker --format '{{range .Mounts}}{{println .Type .Destination .RW}}{{end}}'
 docker inspect agy-worker --format '{{json .HostConfig.CapDrop}}'
 docker inspect agy-worker --format '{{json .HostConfig.SecurityOpt}}'
 docker inspect agy-worker --format '{{.HostConfig.ReadonlyRootfs}}'
 ```
 
-All reported mount types must be `volume`; no entry may have type `bind`. Some Docker versions also list named-volume declarations under `HostConfig.Binds`, so that field alone is not a reliable host-bind test.
+Todos los mounts deben ser volúmenes. `/workspace` debe ser read-only. No debe existir `/var/run/docker.sock`.
 
-## Stop and remove the container
+## Detención
 
 ```bash
 docker compose -f docker-compose.agy-worker.yml down
 ```
 
-This preserves named volumes. Do not add `-v` unless the Agy profile, workspace, and job data are intentionally being destroyed.
+Esto preserva los volúmenes. No añadir `-v` salvo destrucción intencional del perfil, workspace y resultados.
 
-## Explicitly out of scope
+## Fuera de alcance del worker
 
-- mounting the real repository;
-- Git credentials or SSH keys;
-- `coding_job_*` MCP tools;
-- worktrees and temporary branches;
-- process execution from the MCP;
-- `--dangerously-skip-permissions`;
-- PR, merge, deployment, or Docker control from Agy.
+- credenciales GitHub o SSH;
+- commits, push, PR o merge;
+- escritura directa en `main`;
+- acceso al Docker socket;
+- comandos de despliegue;
+- shell MCP genérico;
+- aprobación automática de permisos.
