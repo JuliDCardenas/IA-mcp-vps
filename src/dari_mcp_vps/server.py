@@ -12,6 +12,7 @@ from dari_mcp_vps.tools.docker_tools import register_docker_tools
 from dari_mcp_vps.tools.git_tools import register_git_tools
 from dari_mcp_vps.tools.compose_tools import register_compose_tools
 from dari_mcp_vps.tools.http_tools import register_http_tools
+from dari_mcp_vps.tools.coding_jobs import register_coding_job_tools
 
 CONFIG = load_config()
 mcp = FastMCP(CONFIG.raw.get("server", {}).get("name", "IA MCP VPS"))
@@ -23,6 +24,7 @@ register_docker_tools(mcp, CONFIG)
 register_git_tools(mcp, CONFIG)
 register_compose_tools(mcp, CONFIG)
 register_http_tools(mcp, CONFIG)
+register_coding_job_tools(mcp, CONFIG)
 
 
 def main() -> None:
