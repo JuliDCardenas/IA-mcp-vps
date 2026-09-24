@@ -13,14 +13,17 @@ RUN apt-get update \
 
 RUN groupadd --gid 10001 agy \
     && useradd --uid 10001 --gid 10001 --create-home --shell /bin/bash agy \
-    && install -d -o agy -g agy /workspace /var/lib/coding-jobs
+    && install -d -o agy -g agy \
+        /home/agy/.local/bin \
+        /workspace \
+        /var/lib/coding-jobs
 
 USER agy
 ENV HOME=/home/agy
 ENV PATH=/home/agy/.local/bin:${PATH}
 
 RUN curl -fsSL "${AGY_INSTALL_URL}" -o /tmp/install-agy.sh \
-    && bash /tmp/install-agy.sh --skip-path --skip-aliases \
+    && bash /tmp/install-agy.sh --dir /home/agy/.local/bin \
     && rm -f /tmp/install-agy.sh \
     && agy --version
 
