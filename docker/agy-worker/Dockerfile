@@ -10,6 +10,7 @@ RUN apt-get update \
         curl \
         git \
         jq \
+        openssh-client \
         python3 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -29,16 +30,21 @@ COPY --chmod=0555 docker/agy-worker/job/run-implementation-job.sh /opt/agy-job/r
 COPY --chmod=0555 docker/agy-worker/job/read-artifact.sh /opt/agy-job/read-artifact.sh
 COPY --chmod=0444 docker/agy-worker/job/result-schema.json /opt/agy-job/result-schema.json
 COPY --chmod=0444 docker/agy-worker/job/implementation-result-schema.json /opt/agy-job/implementation-result-schema.json
+COPY --chmod=0444 docker/agy-worker/job/github-known-hosts.txt /opt/agy-job/github-known-hosts.txt
 
 USER agy
 ENV HOME=/home/agy
 ENV PATH=/home/agy/.local/bin:${PATH}
 ENV PYTHONPYCACHEPREFIX=/tmp/agy-pycache
+ENV GIT_CONFIG_COUNT=1
+ENV GIT_CONFIG_KEY_0=status.showUntrackedFiles
+ENV GIT_CONFIG_VALUE_0=all
 
 RUN curl -fsSL "${AGY_INSTALL_URL}" -o /tmp/install-agy.sh \
     && bash /tmp/install-agy.sh --dir /home/agy/.local/bin \
     && rm -f /tmp/install-agy.sh \
-    && agy --version
+    && agy --version \
+    && ssh-keygen -lf /opt/agy-job/github-known-hosts.txt >/dev/null
 
 WORKDIR /workspace
 
