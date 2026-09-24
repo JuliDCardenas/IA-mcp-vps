@@ -28,6 +28,12 @@ services:
       - agy_home:/home/agy
       - agy_workspace:/workspace:ro
       - coding_jobs:/var/lib/coding-jobs
+    secrets:
+      - source: repo_key_repositorio_bd_emision
+        target: repo_key_repositorio_bd_emision
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
     healthcheck:
       test: [CMD, agy, --version]
       interval: 30s
@@ -68,6 +74,10 @@ services:
       - agy_workspace:/workspace:ro
       - coding_jobs:/var/lib/coding-jobs
     command: [/opt/agy-bootstrap/run-bootstrap-audit.sh]
+
+secrets:
+  repo_key_repositorio_bd_emision:
+    file: ${REPO_KEY_REPOSITORIO_BD_EMISION_FILE:?Set REPO_KEY_REPOSITORIO_BD_EMISION_FILE in .env}
 
 volumes:
   agy_home:
