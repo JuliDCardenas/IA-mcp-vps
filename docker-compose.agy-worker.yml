@@ -1,3 +1,5 @@
+name: ia-mcp-vps-agy-worker
+
 services:
   agy-worker:
     build:
