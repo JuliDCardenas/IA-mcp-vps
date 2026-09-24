@@ -33,6 +33,7 @@ COPY --chmod=0444 docker/agy-worker/job/implementation-result-schema.json /opt/a
 USER agy
 ENV HOME=/home/agy
 ENV PATH=/home/agy/.local/bin:${PATH}
+ENV PYTHONPYCACHEPREFIX=/tmp/agy-pycache
 
 RUN curl -fsSL "${AGY_INSTALL_URL}" -o /tmp/install-agy.sh \
     && bash /tmp/install-agy.sh --dir /home/agy/.local/bin \
