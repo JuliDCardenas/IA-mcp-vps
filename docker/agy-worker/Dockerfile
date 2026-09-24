@@ -10,6 +10,7 @@ RUN apt-get update \
         curl \
         git \
         jq \
+        python3 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --gid 10001 agy \
@@ -24,7 +25,10 @@ COPY --chmod=0555 docker/agy-worker/bootstrap/configure-readonly-permissions.sh 
 COPY --chmod=0444 docker/agy-worker/bootstrap/prompt.txt /opt/agy-bootstrap/prompt.txt
 COPY --chmod=0444 docker/agy-worker/bootstrap/result-schema.json /opt/agy-bootstrap/result-schema.json
 COPY --chmod=0555 docker/agy-worker/job/run-job.sh /opt/agy-job/run-job.sh
+COPY --chmod=0555 docker/agy-worker/job/run-implementation-job.sh /opt/agy-job/run-implementation-job.sh
+COPY --chmod=0555 docker/agy-worker/job/read-artifact.sh /opt/agy-job/read-artifact.sh
 COPY --chmod=0444 docker/agy-worker/job/result-schema.json /opt/agy-job/result-schema.json
+COPY --chmod=0444 docker/agy-worker/job/implementation-result-schema.json /opt/agy-job/implementation-result-schema.json
 
 USER agy
 ENV HOME=/home/agy
