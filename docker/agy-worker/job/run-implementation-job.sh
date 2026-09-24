@@ -12,7 +12,7 @@ readonly STDERR_FILE="${JOB_DIR}/stderr.log"
 readonly CONTEXT_FILE="${JOB_DIR}/repository-context.txt"
 readonly MANIFEST_FILE="${JOB_DIR}/manifest.json"
 readonly SCHEMA_FILE="/opt/agy-job/implementation-result-schema.json"
-readonly SOURCE_REPOSITORY="/workspace/IA-mcp-vps"
+readonly SOURCE_REPOSITORY_URL="https://github.com/JuliDCardenas/IA-mcp-vps.git"
 readonly WORKTREE="${JOB_DIR}/worktree/repo"
 readonly MAX_CONTEXT_BYTES=196608
 readonly MAX_CHANGED_BYTES=524288
@@ -34,6 +34,10 @@ write_job() {
 fail_job() {
   write_job FAILED FAILED "${1:0:500}"
   exit 1
+}
+
+git_status() {
+  git -c status.renames=false -C "${WORKTREE}" status --porcelain
 }
 
 build_context() {
@@ -71,8 +75,8 @@ validate_path() {
 write_job PREPARING PREPARING
 rm -rf "${JOB_DIR}/worktree"
 mkdir -p "${JOB_DIR}/worktree"
-if ! git clone --local --no-hardlinks "${SOURCE_REPOSITORY}" "${WORKTREE}" >> "${STDERR_FILE}" 2>&1; then
-  fail_job "Unable to create isolated job worktree"
+if ! git clone --depth 1 --branch main "${SOURCE_REPOSITORY_URL}" "${WORKTREE}" >> "${STDERR_FILE}" 2>&1; then
+  fail_job "Unable to create fresh isolated job worktree"
 fi
 base_commit="$(git -C "${WORKTREE}" rev-parse HEAD)"
 if ! build_context; then
@@ -135,17 +139,17 @@ while IFS= read -r change; do
   mv "${target}.tmp" "${target}"
 done < <(jq -c '.structured_output.changes[]' "${RAW_FILE}")
 
-if [[ -z "$(git -C "${WORKTREE}" status --porcelain)" ]]; then
+if [[ -z "$(git_status)" ]]; then
   fail_job "Implementation produced no repository changes"
 fi
 git -C "${WORKTREE}" diff --check || fail_job "git diff validation failed"
 
-if git -C "${WORKTREE}" status --porcelain | grep -qE '\.py$'; then
+if git_status | grep -qE '\.py$'; then
   python3 -m compileall -q "${WORKTREE}" || fail_job "Python syntax validation failed"
 fi
 while IFS= read -r shell_file; do
   bash -n "${WORKTREE}/${shell_file}" || fail_job "Shell syntax validation failed"
-done < <(git -C "${WORKTREE}" status --porcelain | sed -n 's/^...\(.*\.sh\)$/\1/p')
+done < <(git_status | sed -n 's/^...\(.*\.sh\)$/\1/p')
 
 printf '{"base_commit":"%s","changes":[' "${base_commit}" > "${MANIFEST_FILE}.tmp"
 first=true
@@ -165,12 +169,12 @@ while IFS= read -r line; do
   first=false
   jq -cn --arg path "${path}" --arg operation "${operation}" --arg sha256 "${sha256}" --argjson size "${size}" \
     '{path:$path,operation:$operation,size:$size,sha256:(if $sha256 == "" then null else $sha256 end)}' >> "${MANIFEST_FILE}.tmp"
-done < <(git -C "${WORKTREE}" status --porcelain)
+done < <(git_status)
 printf ']}' >> "${MANIFEST_FILE}.tmp"
 mv "${MANIFEST_FILE}.tmp" "${MANIFEST_FILE}"
 
 jq --arg job_id "${JOB_ID}" --arg base_commit "${base_commit}" --slurpfile manifest "${MANIFEST_FILE}" \
-  '{job_id:$job_id,status:"NOTION_REVIEW",task_type:"implement",conversation_id,summary:.structured_output.summary,base_commit:$base_commit,changes:$manifest[0].changes,verification:{diff_check:"passed",secret_scan:"passed",syntax_checks:"passed"},tests_recommended:.structured_output.tests_recommended,risks:.structured_output.risks,usage}' \
+  '{job_id:$job_id,status:"NOTION_REVIEW",task_type:"implement",conversation_id,summary:.structured_output.summary,base_commit:$base_commit,changes:$manifest[0].changes,artifacts:[.structured_output.changes[] | select(.operation == "upsert") | {path,content}],verification:{diff_check:"passed",secret_scan:"passed",syntax_checks:"passed"},tests_recommended:.structured_output.tests_recommended,risks:.structured_output.risks,usage}' \
   "${RAW_FILE}" > "${RESULT_FILE}.tmp"
 mv "${RESULT_FILE}.tmp" "${RESULT_FILE}"
 write_job NOTION_REVIEW NOTION_REVIEW
