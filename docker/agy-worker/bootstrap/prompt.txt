@@ -3,6 +3,8 @@ You are auditing the FastMCP repository available in the current read-only works
 Goal:
 Design the data contracts and repository structure for a read-only asynchronous coding-job subsystem.
 
+Use only built-in read-only repository inspection tools such as code_search, grep_search, and view_file. Do not invoke run_command or request command permission.
+
 Required scope:
 1. Inspect the existing repository architecture and conventions.
 2. Define job models and validated state transitions.
@@ -22,6 +24,7 @@ Acceptance criteria:
 
 Forbidden:
 - Do not modify, create, or delete files.
+- Do not invoke run_command or any shell command.
 - Do not implement process execution.
 - Do not add shell, Docker, deployment, Git push, PR, merge, or write capabilities.
 - Do not request or inspect secrets.

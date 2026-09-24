@@ -7,6 +7,7 @@ readonly SCHEMA_FILE=/opt/agy-bootstrap/result-schema.json
 
 agy \
   -p "$(cat "${PROMPT_FILE}")" \
+  --mode=plan \
   --output-format json \
   --json-schema "${SCHEMA_FILE}" \
   --sandbox \
