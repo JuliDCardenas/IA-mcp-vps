@@ -18,6 +18,10 @@ RUN groupadd --gid 10001 agy \
         /workspace \
         /var/lib/coding-jobs
 
+COPY --chmod=0555 docker/agy-worker/bootstrap/run-bootstrap-audit.sh /opt/agy-bootstrap/run-bootstrap-audit.sh
+COPY --chmod=0444 docker/agy-worker/bootstrap/prompt.txt /opt/agy-bootstrap/prompt.txt
+COPY --chmod=0444 docker/agy-worker/bootstrap/result-schema.json /opt/agy-bootstrap/result-schema.json
+
 USER agy
 ENV HOME=/home/agy
 ENV PATH=/home/agy/.local/bin:${PATH}

@@ -1,0 +1,62 @@
+{
+  "type": "object",
+  "properties": {
+    "summary": {"type": "string"},
+    "files_inspected": {"type": "array", "items": {"type": "string"}},
+    "assumptions": {"type": "array", "items": {"type": "string"}},
+    "proposed_file_tree": {"type": "array", "items": {"type": "string"}},
+    "job_model": {"type": "object", "additionalProperties": true},
+    "state_transitions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "from": {"type": "string"},
+          "to": {"type": "array", "items": {"type": "string"}},
+          "notes": {"type": "string"}
+        },
+        "required": ["from", "to", "notes"],
+        "additionalProperties": false
+      }
+    },
+    "tool_contracts": {
+      "type": "object",
+      "properties": {
+        "coding_job_create": {"type": "object", "additionalProperties": true},
+        "coding_job_status": {"type": "object", "additionalProperties": true},
+        "coding_job_result": {"type": "object", "additionalProperties": true}
+      },
+      "required": ["coding_job_create", "coding_job_status", "coding_job_result"],
+      "additionalProperties": false
+    },
+    "repository_policy": {"type": "object", "additionalProperties": true},
+    "threat_model": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "risk": {"type": "string"},
+          "mitigation": {"type": "string"}
+        },
+        "required": ["risk", "mitigation"],
+        "additionalProperties": false
+      }
+    },
+    "implementation_plan": {"type": "array", "items": {"type": "string"}},
+    "open_questions": {"type": "array", "items": {"type": "string"}}
+  },
+  "required": [
+    "summary",
+    "files_inspected",
+    "assumptions",
+    "proposed_file_tree",
+    "job_model",
+    "state_transitions",
+    "tool_contracts",
+    "repository_policy",
+    "threat_model",
+    "implementation_plan",
+    "open_questions"
+  ],
+  "additionalProperties": false
+}
