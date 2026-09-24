@@ -7,7 +7,7 @@ readonly JOB_DIR="/var/lib/coding-jobs/${JOB_ID}"
 readonly REQUEST_FILE="${JOB_DIR}/request.json"
 readonly JOB_FILE="${JOB_DIR}/job.json"
 readonly RESULT_FILE="${JOB_DIR}/result.json"
-readonly RAW_FILE="${JOB_DIR}/agy-result.json"
+readonly RAW_FILE="${JOB_DIR}/raw.json"
 readonly STDERR_FILE="${JOB_DIR}/stderr.log"
 readonly SCHEMA_FILE="/opt/agy-job/result-schema.json"
 
@@ -42,6 +42,10 @@ fail_job() {
   exit 1
 }
 
+if ! /opt/agy-bootstrap/configure-readonly-permissions.sh >> "${STDERR_FILE}" 2>&1; then
+  fail_job "Unable to configure scoped Agy read permissions"
+fi
+
 write_job CONTEXT_READY CONTEXT_READY
 
 goal="$(jq -r '.goal' "${REQUEST_FILE}")"
@@ -67,7 +71,7 @@ if ! agy \
   --json-schema "${SCHEMA_FILE}" \
   --sandbox \
   --print-timeout 20m \
-  > "${RAW_FILE}" 2> "${STDERR_FILE}"; then
+  > "${RAW_FILE}" 2>> "${STDERR_FILE}"; then
   fail_job "Agy execution failed"
 fi
 
