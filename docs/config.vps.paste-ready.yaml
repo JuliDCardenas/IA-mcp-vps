@@ -96,6 +96,7 @@ allowed_services:
 
 allowed_containers:
   - ia-mcp-vps
+  - agy-worker
   - mosquitto
   - traccar
   - subscriber-json-osmand
@@ -130,6 +131,14 @@ allowed_compose_projects:
       - ia-mcp-vps
     services:
       - ia-mcp-vps
+
+  agy_worker:
+    path: /mnt/stacks/IA-mcp-vps/docker-compose.agy-worker.yml
+    compose_project_name: agy-worker
+    container_names:
+      - agy-worker
+    services:
+      - agy-worker
 
   mosquitto:
     path: /mnt/stacks/mosquitto/docker-compose.yml

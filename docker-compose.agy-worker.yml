@@ -1,0 +1,75 @@
+name: agy-worker
+
+x-agy-security: &agy-security
+  user: "10001:10001"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 256
+  mem_limit: 2g
+  cpus: 2.0
+  environment:
+    HOME: /home/agy
+    PATH: /home/agy/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=256m
+
+services:
+  agy-worker:
+    <<: *agy-security
+    image: ia-mcp-vps-agy-worker:local
+    build:
+      context: .
+      dockerfile: docker/agy-worker/Dockerfile
+    container_name: agy-worker
+    restart: unless-stopped
+    init: true
+    volumes:
+      - agy_home:/home/agy
+      - agy_workspace:/workspace:ro
+      - coding_jobs:/var/lib/coding-jobs
+    healthcheck:
+      test: [CMD, agy, --version]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  repo-seed:
+    <<: *agy-security
+    image: ia-mcp-vps-agy-worker:local
+    profiles: [seed]
+    volumes:
+      - agy_workspace:/workspace
+    command:
+      - bash
+      - -lc
+      - |
+        set -euo pipefail
+        rm -rf /workspace/IA-mcp-vps
+        git clone --depth 1 --branch main https://github.com/JuliDCardenas/IA-mcp-vps.git /workspace/IA-mcp-vps
+        git -C /workspace/IA-mcp-vps status --short --branch
+
+  agy-permissions-init:
+    <<: *agy-security
+    image: ia-mcp-vps-agy-worker:local
+    profiles: [audit]
+    volumes:
+      - agy_home:/home/agy
+    command: [/opt/agy-bootstrap/configure-readonly-permissions.sh]
+
+  agy-bootstrap-audit:
+    <<: *agy-security
+    image: ia-mcp-vps-agy-worker:local
+    profiles: [audit]
+    working_dir: /workspace/IA-mcp-vps
+    volumes:
+      - agy_home:/home/agy
+      - agy_workspace:/workspace:ro
+      - coding_jobs:/var/lib/coding-jobs
+    command: [/opt/agy-bootstrap/run-bootstrap-audit.sh]
+
+volumes:
+  agy_home:
+  agy_workspace:
+  coding_jobs:
