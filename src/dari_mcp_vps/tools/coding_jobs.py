@@ -4,12 +4,14 @@ import base64
 import json
 import re
 import socket
+import time
 import uuid
 from typing import Any
 
 DOCKER_SOCK = "/var/run/docker.sock"
 WORKER_CONTAINER = "agy-worker"
 JOB_ID_RE = re.compile(r"^job_[0-9a-f]{32}$")
+TERMINAL_STATES = {"NOTION_REVIEW", "FAILED", "CANCELLED", "EXPIRED"}
 
 
 def _decode_chunked(data: bytes) -> bytes:
@@ -113,10 +115,9 @@ def _exec(cmd: list[str], *, detach: bool) -> str:
             "Cmd": cmd,
         },
     )
-    exec_id = created["Id"]
     output = _docker_request(
         "POST",
-        f"/exec/{exec_id}/start",
+        f"/exec/{created['Id']}/start",
         {"Detach": detach, "Tty": False},
     )
     return "" if detach else _demux(output)
@@ -128,13 +129,29 @@ def _validate_job_id(job_id: str) -> str:
     return job_id
 
 
-def _read_json(job_id: str, filename: str) -> dict[str, Any]:
+def _read_text(job_id: str, filename: str) -> str:
     _validate_job_id(job_id)
-    output = _exec(["cat", f"/var/lib/coding-jobs/{job_id}/{filename}"], detach=False)
+    return _exec(["cat", f"/var/lib/coding-jobs/{job_id}/{filename}"], detach=False)
+
+
+def _read_json(job_id: str, filename: str) -> dict[str, Any]:
+    output = _read_text(job_id, filename)
     try:
         return json.loads(output)
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"Invalid worker response for {job_id}") from exc
+
+
+def _redact(text: str) -> str:
+    patterns = [
+        r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+",
+        r"(?i)((?:api[_-]?key|token|secret|password)\s*[:=]\s*)\S+",
+        r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}",
+        r"AIza[0-9A-Za-z_-]{20,}",
+    ]
+    for pattern in patterns:
+        text = re.sub(pattern, r"\1[REDACTED]" if pattern.startswith("(?i)(") else "[REDACTED]", text)
+    return text
 
 
 def _validate_text_list(name: str, values: list[str] | None, *, maximum: int = 10) -> list[str]:
@@ -148,6 +165,9 @@ def _validate_text_list(name: str, values: list[str] | None, *, maximum: int = 1
 
 
 def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
+    def status_payload(job_id: str) -> dict[str, Any]:
+        return _read_json(job_id, "job.json")
+
     @mcp.tool()
     def coding_job_create(
         repository: str,
@@ -189,14 +209,47 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
     @mcp.tool()
     def coding_job_status(job_id: str) -> dict[str, Any]:
         """Return the current state and timestamps for an Agy coding job."""
-        return _read_json(job_id, "job.json")
+        return status_payload(job_id)
+
+    @mcp.tool()
+    def coding_job_wait(job_id: str, timeout_seconds: int = 90, poll_seconds: int = 2) -> dict[str, Any]:
+        """Wait a bounded time for a coding job to reach a terminal state."""
+        timeout_seconds = min(max(int(timeout_seconds), 1), 120)
+        poll_seconds = min(max(int(poll_seconds), 1), 10)
+        deadline = time.monotonic() + timeout_seconds
+        status = status_payload(job_id)
+        while status.get("status") not in TERMINAL_STATES and time.monotonic() < deadline:
+            time.sleep(poll_seconds)
+            status = status_payload(job_id)
+        return {**status, "wait_timed_out": status.get("status") not in TERMINAL_STATES}
 
     @mcp.tool()
     def coding_job_result(job_id: str) -> dict[str, Any]:
-        """Return the bounded structured result for a terminal Agy coding job."""
-        status = _read_json(job_id, "job.json")
-        if status.get("status") not in {"NOTION_REVIEW", "FAILED", "CANCELLED", "EXPIRED"}:
+        """Return the bounded structured result or sanitized failure diagnostics."""
+        status = status_payload(job_id)
+        if status.get("status") not in TERMINAL_STATES:
             return {"job_id": job_id, "status": status.get("status"), "result": None}
-        if status.get("status") != "NOTION_REVIEW":
-            return {"job_id": job_id, "status": status.get("status"), "error": status.get("error")}
-        return _read_json(job_id, "result.json")
+        if status.get("status") == "NOTION_REVIEW":
+            return _read_json(job_id, "result.json")
+
+        diagnostic: dict[str, Any] = {}
+        try:
+            raw = _read_json(job_id, "raw.json")
+            diagnostic = {
+                "agy_status": raw.get("status"),
+                "agy_error": _redact(str(raw.get("error") or ""))[:1000] or None,
+                "conversation_id": raw.get("conversation_id"),
+                "response_preview": _redact(str(raw.get("response") or ""))[:1000] or None,
+            }
+        except Exception:
+            pass
+        try:
+            diagnostic["stderr_tail"] = _redact(_read_text(job_id, "stderr.log"))[-2000:] or None
+        except Exception:
+            diagnostic["stderr_tail"] = None
+        return {
+            "job_id": job_id,
+            "status": status.get("status"),
+            "error": status.get("error"),
+            "diagnostic": diagnostic,
+        }
