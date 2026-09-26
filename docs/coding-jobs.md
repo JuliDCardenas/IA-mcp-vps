@@ -40,13 +40,25 @@ CREATED
 El contenedor orquestador del servidor MCP (`ia-mcp-vps`) posee acceso a `/var/run/docker.sock`, `/home/ubuntu` (`/mnt/stacks`), `./config.yaml` y a los repositorios base permanentes. Ejecutar Agy directamente dentro del contenedor MCP o reutilizar un worker multitenant expondría el host y secretos.
 
 Por ello, el orquestador implementa `DockerAgyJobRunner`, el cual utiliza la API de Docker para aprovisionar **un contenedor efímero aislado por trabajo (`agy-job-{job_id}`)** con las siguientes garantías:
-1. **Separación estricta de rutas de almacenamiento:**
+1. **Separación estricta de rutas de almacenamiento y control de permisos (ACLs):**
    - Ruta interna del contenedor MCP (`storage_root`): `/var/lib/coding-jobs`.
    - Ruta absoluta en el host (`host_storage_root`): `/home/ubuntu/.local/share/ia-mcp-vps/coding-jobs`.
+   - **Control de identidad y UIDs:** El servicio MCP (`ia-mcp-vps`) se ejecuta con UID 1001 en el host, mientras que los contenedores de trabajo de Agy (`agy-job-*`) se ejecutan como UID 10001 (`agy`).
+   - **Requisito de ACLs e inherencia predeterminada:** Debido a la coexistencia de ambos usuarios sobre el almacenamiento compartido de repositorios base y worktrees, se requieren listas de control de acceso POSIX (ACLs) con herencia predeterminada (`default ACLs`). **No se debe utilizar `chmod 777`** bajo ninguna circunstancia, ya que relajaría la frontera de seguridad exponiendo el almacenamiento a cualquier proceso no privilegiado del sistema.
+   - El paquete `acl` del sistema operativo (en distribuciones basadas en Debian/Ubuntu disponible mediante `apt-get install acl`) provee las utilidades `setfacl` y `getfacl`.
    - Prerrequisito de despliegue en el host:
      ```bash
-     sudo install -d -o 10001 -g 10001 -m 0700 \
-       /home/ubuntu/.local/share/ia-mcp-vps/coding-jobs
+     # 1. Instalar paquete acl si no está disponible
+     sudo apt-get install -y acl
+
+     # 2. Crear el directorio de almacenamiento
+     sudo mkdir -p /home/ubuntu/.local/share/ia-mcp-vps/coding-jobs
+
+     # 3. Aplicar ACLs recursivas para UID 1001 (MCP) y UID 10001 (Agy)
+     sudo setfacl -R -m u:1001:rwx,u:10001:rwx /home/ubuntu/.local/share/ia-mcp-vps/coding-jobs
+
+     # 4. Configurar inherencia predeterminada (-d) para que nuevos directorios y archivos hereden acceso para ambos UIDs
+     sudo setfacl -R -d -m u:1001:rwx,u:10001:rwx /home/ubuntu/.local/share/ia-mcp-vps/coding-jobs
      ```
    - El servicio `ia-mcp-vps` en `docker-compose.yml` monta:
      `/home/ubuntu/.local/share/ia-mcp-vps/coding-jobs:/var/lib/coding-jobs`.

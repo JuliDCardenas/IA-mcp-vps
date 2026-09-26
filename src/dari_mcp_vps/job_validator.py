@@ -40,11 +40,16 @@ SECRET_PATTERNS = [
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
     re.compile(r"Bearer\s+[A-Za-z0-9._~+/=-]{20,}", re.IGNORECASE),
     re.compile(r"(?:api[_-]?key|token|secret|password)\s*[:=]\s*['\"][A-Za-z0-9._~+/=-]{16,}['\"]", re.IGNORECASE),
+    re.compile(r"(?:AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}"),
 ]
 
 
 class ValidationError(WorktreeManagerError):
     """Raised when deterministic validation fails."""
+
+
+class EmptyImplementationError(ValidationError):
+    """Raised when an implementation job produces zero changed files."""
 
 
 class SecretDetectedError(ValidationError):
@@ -115,12 +120,49 @@ class JobValidator:
         if os.path.islink(self.worktree_dir):
             raise SecurityError(f"Symlinks forbidden for worktree root: {self.worktree_dir}")
 
+    @staticmethod
+    def build_test_environment() -> dict[str, str]:
+        """Construct a sanitized runtime environment for allowlisted test execution.
+
+        Includes fixed deterministic non-secret Git identity so tests can execute
+        git commit commands without requiring global or system Git configuration,
+        while preserving strictly necessary runtime variables and withholding
+        publication credentials or secrets.
+        """
+        env: dict[str, str] = {
+            "GIT_AUTHOR_NAME": "IA MCP Test",
+            "GIT_AUTHOR_EMAIL": "ia-mcp-test@localhost",
+            "GIT_COMMITTER_NAME": "IA MCP Test",
+            "GIT_COMMITTER_EMAIL": "ia-mcp-test@localhost",
+        }
+        preserved_keys = (
+            "PATH",
+            "PYTHONPATH",
+            "HOME",
+            "TMPDIR",
+            "TEMP",
+            "TMP",
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+        )
+        for key in preserved_keys:
+            val = os.environ.get(key)
+            if val is not None:
+                env[key] = val
+
+        if "PATH" not in env:
+            env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+        return env
+
     def validate(
         self,
         base_commit: str,
         feature_branch: str,
         test_commands: tuple[tuple[str, ...], ...] = (),
         expected_base_commit: str | None = None,
+        task_type: str = "implement",
     ) -> ValidationReport:
         errors: list[str] = []
 
@@ -268,6 +310,12 @@ class JobValidator:
         if len(changes) > MAX_CHANGED_FILES:
             raise ValidationError(f"Too many changed files: {len(changes)} > {MAX_CHANGED_FILES}")
 
+        # Empty implementation rejection: implementation jobs must produce changed files
+        if task_type == "implement" and len(changes) == 0:
+            raise EmptyImplementationError(
+                "Implementation produced zero changed files: worktree contains no changes relative to base commit"
+            )
+
         # 4. git diff --check (live worktree against base_commit)
         diff_check = subprocess.run(
             ["git", "-C", str(self.worktree_dir), "diff", "--check", base_commit],
@@ -333,12 +381,14 @@ class JobValidator:
 
         # 6. Execute allowlisted test commands
         test_results: list[TestCommandResult] = []
+        test_env = self.build_test_environment()
         for cmd in test_commands:
             if not cmd or not isinstance(cmd, (list, tuple)):
                 continue
             proc = subprocess.run(
                 list(cmd),
                 cwd=str(self.worktree_dir),
+                env=test_env,
                 capture_output=True,
                 text=True,
                 shell=False,

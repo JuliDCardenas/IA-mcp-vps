@@ -360,6 +360,8 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
                 "publish_info": job.publish_info,
                 "pr_info": job.pr_info,
                 "error": job.error,
+                "exit_code": job.exit_code,
+                "execution_output_tail": job.execution_output_tail,
             }
 
         status = status_payload(job_id)

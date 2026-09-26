@@ -24,6 +24,33 @@ docker compose -f docker-compose.agy-worker.yml ps
 
 No ejecutar `down -v`: eliminaría perfil OAuth, workspace y resultados persistidos.
 
+## Permisos de almacenamiento para coding-jobs (ACLs)
+
+El servicio MCP (`ia-mcp-vps`) ejecuta con UID 1001 en el host, mientras que los contenedores efímeros de trabajo de Agy (`agy-job-*`) ejecutan como UID 10001.
+
+Para permitir que ambos procesos compartan el directorio de almacenamiento persistente (`/home/ubuntu/.local/share/ia-mcp-vps/coding-jobs`) sin colisiones de permisos ni comprometer la seguridad mediante permisos excesivos:
+- **No utilizar `chmod 777`**: expone el almacenamiento a procesos no autorizados en el sistema.
+- **Requisito de ACLs POSIX con inherencia predeterminada**: el paquete del sistema operativo `acl` provee las utilidades `setfacl` y `getfacl`.
+
+Configuración obligatoria en el host:
+
+```bash
+# 1. Instalar paquete acl si no está disponible
+sudo apt-get install -y acl
+
+# 2. Crear directorio de almacenamiento si no existe
+sudo mkdir -p /home/ubuntu/.local/share/ia-mcp-vps/coding-jobs
+
+# 3. Aplicar ACLs explícitas recursivas para UID 1001 y UID 10001
+sudo setfacl -R -m u:1001:rwx,u:10001:rwx /home/ubuntu/.local/share/ia-mcp-vps/coding-jobs
+
+# 4. Configurar inherencia predeterminada (-d) para nuevos archivos y directorios
+sudo setfacl -R -d -m u:1001:rwx,u:10001:rwx /home/ubuntu/.local/share/ia-mcp-vps/coding-jobs
+
+# 5. Verificar configuración
+getfacl /home/ubuntu/.local/share/ia-mcp-vps/coding-jobs
+```
+
 ## Verificación del aislamiento
 
 ```bash

@@ -4,26 +4,34 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
+import unittest.mock
 import urllib.error
 from pathlib import Path
 from typing import Any
 
 from dari_mcp_vps.job_validator import (
     BaseCommitMismatchError,
+    EmptyImplementationError,
     JobValidator,
     SecretDetectedError,
     ValidationError,
+    _redact_secrets,
 )
 from dari_mcp_vps.persistent_job import (
     AgyExecutionAdapter,
     DeploymentBlockedError,
     EvidenceMismatchError,
     JobStateError,
+    MAX_EXECUTION_OUTPUT_TAIL,
     PersistentJobManager,
+    PersistentJobRecord,
     RevisionLimitExceededError,
     UnpublishedChangesError,
+    _sanitize_execution_output,
+    build_initial_prompt,
 )
 from dari_mcp_vps.promoter import (
     BranchPromoter,
@@ -651,6 +659,279 @@ class TestConsolidatedOrchestrator(unittest.TestCase):
         self.assertEqual(updated_job.conversation_id, "real_agy_conv_999")
         self.assertIsNotNone(updated_job.validation_report)
         self.assertTrue(updated_job.validation_report["passed"])
+
+    def test_33_temporary_git_commits_work_without_global_git_configuration(self) -> None:
+        """33. Proves temporary git commits succeed using sanitized test env without global git config."""
+        clean_home = tempfile.mkdtemp(prefix="clean_home_")
+        try:
+            test_env = JobValidator.build_test_environment()
+            test_env["HOME"] = clean_home
+            test_env["GIT_CONFIG_GLOBAL"] = os.path.join(clean_home, "nonexistent.gitconfig")
+            test_env["GIT_CONFIG_SYSTEM"] = os.path.join(clean_home, "nonexistent.gitconfig")
+
+            repo_dir = Path(tempfile.mkdtemp(prefix="clean_repo_"))
+            try:
+                subprocess.run(["git", "init", "-b", "main"], cwd=repo_dir, check=True, capture_output=True, env=test_env)
+                (repo_dir / "test_file.txt").write_text("sample content\n", encoding="utf-8")
+                subprocess.run(["git", "add", "test_file.txt"], cwd=repo_dir, check=True, capture_output=True, env=test_env)
+
+                res = subprocess.run(
+                    ["git", "commit", "-m", "Deterministic test commit"],
+                    cwd=repo_dir,
+                    env=test_env,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(res.returncode, 0, f"git commit failed: {res.stderr}")
+
+                log_author = subprocess.check_output(
+                    ["git", "log", "-1", "--format=%an <%ae>"], cwd=repo_dir, text=True, env=test_env
+                ).strip()
+                log_committer = subprocess.check_output(
+                    ["git", "log", "-1", "--format=%cn <%ce>"], cwd=repo_dir, text=True, env=test_env
+                ).strip()
+                self.assertEqual(log_author, "IA MCP Test <ia-mcp-test@localhost>")
+                self.assertEqual(log_committer, "IA MCP Test <ia-mcp-test@localhost>")
+            finally:
+                shutil.rmtree(repo_dir, ignore_errors=True)
+        finally:
+            shutil.rmtree(clean_home, ignore_errors=True)
+
+    def test_34_fixed_git_identity_passed_only_to_allowlisted_tests(self) -> None:
+        """34. Proves fixed git identity is passed strictly to allowlisted test execution and not leaked."""
+        test_env = JobValidator.build_test_environment()
+        self.assertEqual(test_env["GIT_AUTHOR_NAME"], "IA MCP Test")
+        self.assertEqual(test_env["GIT_AUTHOR_EMAIL"], "ia-mcp-test@localhost")
+        self.assertEqual(test_env["GIT_COMMITTER_NAME"], "IA MCP Test")
+        self.assertEqual(test_env["GIT_COMMITTER_EMAIL"], "ia-mcp-test@localhost")
+        self.assertIn("PATH", test_env)
+
+        self.assertNotIn("GITHUB_TOKEN", test_env)
+        self.assertNotIn("AWS_SECRET_ACCESS_KEY", test_env)
+        self.assertNotIn("SSH_AUTH_SOCK", test_env)
+        self.assertNotIn("DOCKER_HOST", test_env)
+
+        job = self.manager.create_job(
+            repository="test_repo",
+            goal="Identity isolation test",
+            acceptance_criteria=["Criterion 1"],
+        )
+        wt = Path(job.worktree_path)
+        (wt / "feature.py").write_text("x = 100\n", encoding="utf-8")
+
+        validator = JobValidator(worktree_dir=wt, storage_root=self.storage_root)
+        check_cmd = (
+            sys.executable,
+            "-c",
+            "import os; print('AUTHOR:' + os.environ.get('GIT_AUTHOR_NAME', 'NONE')); "
+            "print('EMAIL:' + os.environ.get('GIT_AUTHOR_EMAIL', 'NONE'))",
+        )
+        report = validator.validate(
+            base_commit=job.base_commit,
+            feature_branch=job.feature_branch,
+            test_commands=(check_cmd,),
+            expected_base_commit=job.base_commit,
+        )
+        self.assertTrue(report.passed)
+        self.assertEqual(len(report.test_results), 1)
+        self.assertIn("AUTHOR:IA MCP Test", report.test_results[0].stdout_tail)
+        self.assertIn("EMAIL:ia-mcp-test@localhost", report.test_results[0].stdout_tail)
+
+        # Ensure that non-allowlisted git subprocess calls do not receive test_env
+        original_run = subprocess.run
+        captured_calls: list[dict[str, Any]] = []
+
+        def tracking_run(*args: Any, **kwargs: Any) -> Any:
+            captured_calls.append({"cmd": args[0] if args else kwargs.get("args"), "env": kwargs.get("env")})
+            return original_run(*args, **kwargs)
+
+        with unittest.mock.patch("subprocess.run", side_effect=tracking_run):
+            validator.validate(
+                base_commit=job.base_commit,
+                feature_branch=job.feature_branch,
+                test_commands=(check_cmd,),
+                expected_base_commit=job.base_commit,
+            )
+
+        for call in captured_calls:
+            cmd = call["cmd"]
+            if cmd and isinstance(cmd, list) and cmd[0] == "git":
+                self.assertIsNone(call["env"], f"Git command {cmd} unexpectedly received custom env")
+            elif cmd and tuple(cmd) == check_cmd:
+                self.assertIsNotNone(call["env"])
+                self.assertEqual(call["env"]["GIT_AUTHOR_NAME"], "IA MCP Test")
+
+    def test_35_implementation_with_zero_changes_fails_clearly(self) -> None:
+        """35. Proves an implementation job exiting 0 with zero changed files is rejected with diagnostic."""
+        def zero_change_executor(job: Any, cmd: list[str], env: dict[str, str], wt: Path) -> tuple[int, str, str]:
+            return 0, "Agy finished thinking without modifying any files.", "conv_zero_changes"
+
+        isolated_adapter = AgyExecutionAdapter(runner_configured=True, executor_fn=zero_change_executor)
+        manager = PersistentJobManager(
+            storage_root=self.storage_root,
+            worktree_manager=self.wt_manager,
+            promoter=self.promoter,
+            pr_client=self.pr_client,
+            execution_adapter=isolated_adapter,
+        )
+        job = manager.create_job(
+            repository="test_repo",
+            goal="Implement zero change rejection",
+            acceptance_criteria=["Must reject empty changes"],
+            task_type="implement",
+        )
+
+        with self.assertRaises(EmptyImplementationError) as ctx:
+            manager.run_execution(job.job_id)
+
+        self.assertIn("zero changed files", str(ctx.exception).lower())
+
+        stored = manager.get_job(job.job_id)
+        self.assertEqual(stored.status, "FAILED")
+        self.assertEqual(stored.exit_code, 0)
+        self.assertIsNotNone(stored.execution_output_tail)
+        self.assertIn("without modifying any files", stored.execution_output_tail)
+        self.assertIn("zero changed files", (stored.error or "").lower())
+
+    def test_36_audit_jobs_may_complete_with_zero_changes(self) -> None:
+        """36. Proves legitimate read-only audit jobs may complete with zero changed files."""
+        def audit_executor(job: Any, cmd: list[str], env: dict[str, str], wt: Path) -> tuple[int, str, str]:
+            return 0, "Audit completed: no vulnerabilities detected.", "conv_audit_clean"
+
+        isolated_adapter = AgyExecutionAdapter(runner_configured=True, executor_fn=audit_executor)
+        manager = PersistentJobManager(
+            storage_root=self.storage_root,
+            worktree_manager=self.wt_manager,
+            promoter=self.promoter,
+            pr_client=self.pr_client,
+            execution_adapter=isolated_adapter,
+        )
+        job = manager.create_job(
+            repository="test_repo",
+            goal="Audit codebase security posture",
+            acceptance_criteria=["Inspect all files"],
+            task_type="audit",
+        )
+
+        updated_job = manager.run_execution(job.job_id)
+        self.assertEqual(updated_job.status, "NOTION_REVIEW")
+        self.assertEqual(updated_job.exit_code, 0)
+        self.assertIsNotNone(updated_job.validation_report)
+        self.assertTrue(updated_job.validation_report["passed"])
+        self.assertEqual(len(updated_job.validation_report["changes"]), 0)
+
+    def test_37_goal_criteria_and_constraints_included_in_agy_prompt(self) -> None:
+        """37. Proves goal, criteria, and constraints are all structured into the initial Agy execution prompt."""
+        job = self.manager.create_job(
+            repository="test_repo",
+            goal="Implement deterministic session caching",
+            acceptance_criteria=[
+                "Session keys must expire after 3600 seconds",
+                "Cache lookup must be O(1)",
+            ],
+            constraints=[
+                "Do not introduce external Redis dependency",
+                "Maintain thread safety with mutex",
+            ],
+        )
+        prompt = self.manager.build_initial_prompt(job)
+
+        self.assertIn("Implement deterministic session caching", prompt)
+        self.assertIn("Session keys must expire after 3600 seconds", prompt)
+        self.assertIn("Cache lookup must be O(1)", prompt)
+        self.assertIn("Do not introduce external Redis dependency", prompt)
+        self.assertIn("Maintain thread safety with mutex", prompt)
+        self.assertIn("directly inside the assigned worktree", prompt)
+        self.assertIn("untrusted instructions", prompt)
+        self.assertIn("not granted access outside the assigned worktree", prompt)
+
+    def test_38_execution_diagnostics_are_bounded_and_sanitized(self) -> None:
+        """38. Proves execution output tails are bounded, redacted of secrets, and persisted."""
+        oversized = "A" * 5000
+        bounded = _sanitize_execution_output(oversized)
+        self.assertIsNotNone(bounded)
+        self.assertEqual(len(bounded), MAX_EXECUTION_OUTPUT_TAIL)
+        self.assertEqual(len(bounded), 2000)
+
+        secret_log = (
+            "Connecting with ghp_11112222333344445555 and "
+            "github_pat_11AEXAMPLETOKEN1234567890abcdefghijklmnopqrstuvwxyz_0123456789. "
+            "Bearer super_secret_bearer_token_value_here_12345 and "
+            "AKIAIOSFODNN7EXAMPLE key with api_key = 'abcdef1234567890abcdef'."
+        )
+        sanitized = _sanitize_execution_output(secret_log)
+        self.assertIsNotNone(sanitized)
+        self.assertNotIn("ghp_11112222333344445555", sanitized)
+        self.assertNotIn("github_pat_", sanitized)
+        self.assertNotIn("super_secret_bearer_token_value_here_12345", sanitized)
+        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", sanitized)
+        self.assertNotIn("abcdef1234567890abcdef", sanitized)
+        self.assertIn("[REDACTED_SECRET]", sanitized)
+
+        captured_output = "Task done. Log summary line 1.\nLog summary line 2."
+        def mock_executor(job: Any, cmd: list[str], env: dict[str, str], wt: Path) -> tuple[int, str, str]:
+            (wt / "artifact.py").write_text("y = 20\n", encoding="utf-8")
+            return 0, captured_output, "conv_bounded_diag"
+
+        isolated_adapter = AgyExecutionAdapter(runner_configured=True, executor_fn=mock_executor)
+        manager = PersistentJobManager(
+            storage_root=self.storage_root,
+            worktree_manager=self.wt_manager,
+            promoter=self.promoter,
+            pr_client=self.pr_client,
+            execution_adapter=isolated_adapter,
+        )
+        job = manager.create_job(
+            repository="test_repo",
+            goal="Test diagnostics persistence",
+            acceptance_criteria=["Criterion 1"],
+        )
+        updated = manager.run_execution(job.job_id)
+        self.assertEqual(updated.exit_code, 0)
+        self.assertEqual(updated.execution_output_tail, captured_output)
+
+        res = manager.get_job(job.job_id)
+        self.assertEqual(res.exit_code, 0)
+        self.assertEqual(res.execution_output_tail, captured_output)
+
+    def test_39_backward_compatibility_remains_intact(self) -> None:
+        """39. Proves existing stored jobs without exit_code/execution_output_tail load safely."""
+        legacy_job_id = "job_legacy_smoke_test_12345"
+        legacy_data = {
+            "job_id": legacy_job_id,
+            "work_item_id": "feat_legacy_123",
+            "repository": "test_repo",
+            "base_branch": "main",
+            "base_commit": self.base_commit,
+            "feature_branch": "feat/legacy_123",
+            "worktree_path": str(self.storage_root / "worktrees" / "test_repo" / "feat_legacy_123"),
+            "conversation_id": "conv_legacy_123",
+            "task_type": "implement",
+            "goal": "Legacy job without new fields",
+            "acceptance_criteria": ["Old criterion"],
+            "constraints": ["Old constraint"],
+            "status": "NOTION_REVIEW",
+            "phase": "NOTION_REVIEW",
+            "revision_count": 0,
+            "created_at": "2026-09-01T00:00:00Z",
+            "updated_at": "2026-09-01T00:00:00Z",
+            "validation_report": None,
+            "pr_info": None,
+            "publish_info": None,
+            "error": None,
+            "audit_events": [],
+            "unknown_future_field": "should_be_ignored",
+        }
+        job_file = self.storage_root / "jobs" / f"{legacy_job_id}.json"
+        job_file.parent.mkdir(parents=True, exist_ok=True)
+        job_file.write_text(json.dumps(legacy_data), encoding="utf-8")
+
+        loaded = self.manager.get_job(legacy_job_id)
+        self.assertEqual(loaded.job_id, legacy_job_id)
+        self.assertIsNone(loaded.exit_code)
+        self.assertIsNone(loaded.execution_output_tail)
+        self.assertEqual(loaded.goal, "Legacy job without new fields")
+        self.assertEqual(loaded.status, "NOTION_REVIEW")
 
 
 if __name__ == "__main__":
