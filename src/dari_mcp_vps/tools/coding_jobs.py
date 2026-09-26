@@ -2,11 +2,25 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import socket
 import time
 import uuid
+from dataclasses import asdict
+from pathlib import Path
 from typing import Any
+
+from dari_mcp_vps.docker_runner import (
+    DEFAULT_AGY_HOME_VOLUME,
+    DEFAULT_AGY_IMAGE,
+    DEFAULT_JOB_NETWORK,
+    DockerAgyJobRunner,
+    DockerRunnerConfig,
+)
+from dari_mcp_vps.persistent_job import PersistentJobManager
+from dari_mcp_vps.promoter import BranchPromoter, GitHubPRClient
+from dari_mcp_vps.worktree_manager import WorktreeManager
 
 DOCKER_SOCK = "/var/run/docker.sock"
 WORKER_CONTAINER = "agy-worker"
@@ -184,7 +198,58 @@ def _validate_text_list(name: str, values: list[str] | None, *, maximum: int = 1
 
 
 def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
+    def _storage_root() -> Path:
+        storage_root_str = (
+            getattr(app_config, "raw", {}).get("orchestrator", {}).get("storage_root")
+            or os.getenv("IA_MCP_VPS_STORAGE_ROOT")
+            or "/var/lib/coding-jobs"
+        )
+        return Path(storage_root_str)
+
+    _mgr_instance: PersistentJobManager | None = None
+
+    def _get_mgr() -> PersistentJobManager:
+        nonlocal _mgr_instance
+        if _mgr_instance is None:
+            root = _storage_root()
+            worktree_mgr = WorktreeManager(storage_root=root)
+            orchestrator_cfg = getattr(app_config, "raw", {}).get("orchestrator", {})
+            runner_enabled = bool(orchestrator_cfg.get("runner_enabled", False))
+            if not runner_enabled and os.getenv("IA_CODING_JOB_RUNNER_ENABLED", "0").lower() in ("1", "true", "yes"):
+                runner_enabled = True
+
+            host_storage_root_str = orchestrator_cfg.get("host_storage_root") or os.getenv("IA_MCP_VPS_HOST_STORAGE_ROOT")
+            host_storage_root = Path(host_storage_root_str) if host_storage_root_str else None
+
+            runner_cfg = DockerRunnerConfig(
+                enabled=runner_enabled,
+                container_storage_root=root,
+                host_storage_root=host_storage_root,
+                agy_image=orchestrator_cfg.get("agy_image", DEFAULT_AGY_IMAGE),
+                agy_home_volume=orchestrator_cfg.get("agy_home_volume", DEFAULT_AGY_HOME_VOLUME),
+                job_network=orchestrator_cfg.get("job_network", DEFAULT_JOB_NETWORK),
+                timeout_seconds=int(orchestrator_cfg.get("timeout_seconds", 1200)),
+            )
+            runner = DockerAgyJobRunner(config=runner_cfg)
+            _mgr_instance = PersistentJobManager(
+                storage_root=root,
+                worktree_manager=worktree_mgr,
+                execution_adapter=runner,
+            )
+        return _mgr_instance
+
+    def is_persistent_job(job_id: str) -> bool:
+        _validate_job_id(job_id)
+        job_file = _storage_root() / "jobs" / f"{job_id}.json"
+        try:
+            return job_file.exists()
+        except OSError:
+            return False
+
     def status_payload(job_id: str) -> dict[str, Any]:
+        if is_persistent_job(job_id):
+            job = _get_mgr().get_job(job_id)
+            return asdict(job)
         return _read_json(job_id, "job.json")
 
     @mcp.tool()
@@ -195,8 +260,45 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
         acceptance_criteria: list[str],
         constraints: list[str] | None = None,
         base_branch: str = "main",
+        work_item_id: str | None = None,
+        execution_mode: str = "legacy",
     ) -> dict[str, Any]:
         """Create a bounded asynchronous Agy audit or isolated implementation job."""
+        if execution_mode == "persistent" or work_item_id is not None:
+            goal = goal.strip()
+            if not goal or len(goal) > 4000:
+                raise ValueError("goal must contain 1-4000 characters")
+            criteria = _validate_text_list("acceptance_criteria", acceptance_criteria)
+            if not criteria:
+                raise ValueError("At least one acceptance criterion is required")
+            constraints_clean = _validate_text_list("constraints", constraints)
+
+            mgr = _get_mgr()
+            job = mgr.create_job(
+                repository=repository,
+                goal=goal,
+                acceptance_criteria=criteria,
+                constraints=constraints_clean,
+                base_branch=base_branch,
+                work_item_id=work_item_id,
+                task_type=task_type,
+            )
+            try:
+                job = mgr.run_execution(job.job_id)
+            except Exception:
+                job = mgr.get_job(job.job_id)
+
+            return {
+                "job_id": job.job_id,
+                "status": job.status,
+                "repository": job.repository,
+                "task_type": job.task_type,
+                "work_item_id": job.work_item_id,
+                "feature_branch": job.feature_branch,
+                "execution_mode": "persistent",
+                "error": job.error,
+            }
+
         if repository != "ia_mcp_vps":
             raise ValueError("Only repository alias ia_mcp_vps is allowed")
         if task_type not in TASK_SCRIPTS:
@@ -245,6 +347,21 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
     @mcp.tool()
     def coding_job_result(job_id: str) -> dict[str, Any]:
         """Return the bounded structured result or sanitized failure diagnostics."""
+        if is_persistent_job(job_id):
+            job = _get_mgr().get_job(job_id)
+            return {
+                "job_id": job.job_id,
+                "status": job.status,
+                "work_item_id": job.work_item_id,
+                "feature_branch": job.feature_branch,
+                "conversation_id": job.conversation_id,
+                "revision_count": job.revision_count,
+                "validation_report": job.validation_report,
+                "publish_info": job.publish_info,
+                "pr_info": job.pr_info,
+                "error": job.error,
+            }
+
         status = status_payload(job_id)
         if status.get("status") not in TERMINAL_STATES:
             return {"job_id": job_id, "status": status.get("status"), "result": None}
@@ -276,6 +393,13 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
     @mcp.tool()
     def coding_job_changes(job_id: str) -> dict[str, Any]:
         """Return the validated changed-file manifest for an implementation job."""
+        if is_persistent_job(job_id):
+            job = _get_mgr().get_job(job_id)
+            if job.status not in {"NOTION_REVIEW", "CHANGES_APPROVED", "BRANCH_PUBLISHED", "PR_CREATED"}:
+                raise ValueError("Implementation job is not ready for review")
+            manifest_changes = job.validation_report.get("changes", []) if job.validation_report else []
+            return {"job_id": job.job_id, "base_commit": job.base_commit, "changes": manifest_changes}
+
         status = status_payload(job_id)
         if status.get("status") != "NOTION_REVIEW" or status.get("task_type") != "implement":
             raise ValueError("Implementation job is not ready for review")
@@ -285,10 +409,80 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
     @mcp.tool()
     def coding_job_artifact(job_id: str, path: str) -> dict[str, Any]:
         """Return one validated changed text file from an isolated implementation job."""
+        clean_path = _validate_artifact_path(path)
+        if is_persistent_job(job_id):
+            job = _get_mgr().get_job(job_id)
+            wt_dir = Path(job.worktree_path)
+            target = (wt_dir / clean_path).resolve()
+            try:
+                target.relative_to(wt_dir)
+            except ValueError:
+                raise ValueError("Invalid artifact path")
+            if not target.exists() or not target.is_file():
+                raise ValueError(f"Artifact not found: {clean_path}")
+            content = target.read_text(encoding="utf-8", errors="replace")
+            return {"job_id": job_id, "path": clean_path, "content": content}
+
         status = status_payload(job_id)
         if status.get("status") != "NOTION_REVIEW" or status.get("task_type") != "implement":
             raise ValueError("Implementation job is not ready for review")
-        clean_path = _validate_artifact_path(path)
         encoded = base64.b64encode(clean_path.encode("utf-8")).decode("ascii")
         content = _exec(["/opt/agy-job/read-artifact.sh", job_id, encoded], detach=False)
         return {"job_id": job_id, "path": clean_path, "content": content}
+
+    @mcp.tool()
+    def coding_job_request_revision(job_id: str, feedback: str) -> dict[str, Any]:
+        """Request an implementation revision with bounded feedback (max 3 cycles)."""
+        mgr = _get_mgr()
+        job = mgr.request_revision(job_id=job_id, feedback=feedback)
+        try:
+            job = mgr.run_execution(job_id=job_id, is_revision=True, feedback=feedback)
+        except Exception:
+            job = mgr.get_job(job_id)
+        return asdict(job)
+
+    @mcp.tool()
+    def coding_job_approve_changes(
+        job_id: str,
+        expected_validation_hash: str,
+        expected_base_commit: str,
+    ) -> dict[str, Any]:
+        """Approve validated worktree changes from NOTION_REVIEW state."""
+        job = _get_mgr().approve_changes(
+            job_id=job_id,
+            expected_validation_hash=expected_validation_hash,
+            expected_base_commit=expected_base_commit,
+        )
+        return asdict(job)
+
+    @mcp.tool()
+    def coding_job_publish_branch(job_id: str) -> dict[str, Any]:
+        """Publish the approved feature branch via the isolated promoter boundary."""
+        job = _get_mgr().publish_branch(job_id=job_id)
+        return asdict(job)
+
+    @mcp.tool()
+    def coding_job_create_pull_request(
+        job_id: str,
+        title: str | None = None,
+        body: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a Pull Request for the published feature branch."""
+        job = _get_mgr().create_pull_request(job_id=job_id, title=title, body=body)
+        return asdict(job)
+
+    @mcp.tool()
+    def coding_job_cancel(job_id: str, reason: str | None = None) -> dict[str, Any]:
+        """Cancel an active coding job idempotently without deleting the worktree."""
+        if is_persistent_job(job_id):
+            job = _get_mgr().cancel_job(job_id=job_id, reason=reason)
+            return asdict(job)
+        return {"job_id": job_id, "status": "CANCELLED", "reason": reason}
+
+    @mcp.tool()
+    def coding_job_cleanup(job_id: str) -> dict[str, Any]:
+        """Clean up the assigned persistent worktree safely, preserving base repository."""
+        if is_persistent_job(job_id):
+            job = _get_mgr().cleanup_job(job_id=job_id)
+            return asdict(job)
+        return {"job_id": job_id, "status": "CLEANED_UP", "message": "Legacy job cleanup completed"}

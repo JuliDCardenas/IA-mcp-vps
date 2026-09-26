@@ -112,3 +112,14 @@ allowed_http_targets:
     url: http://host.docker.internal:5678
   grafana_local:
     url: http://host.docker.internal:3000
+
+orchestrator:
+  storage_root: /var/lib/coding-jobs
+  host_storage_root: /home/ubuntu/.local/share/ia-mcp-vps/coding-jobs  # Exact host path used only by trusted Docker runner
+  runner_enabled: false   # Fails closed by default; must be explicitly enabled after deployment prerequisites
+  agy_image: ia-mcp-vps-agy-worker:local
+  agy_home_volume: agy-worker_agy_home
+  job_network: agy-worker_default
+  timeout_seconds: 1200
+  promoter_enabled: false # Fails closed: no branch push without manual approval
+  github_pr_enabled: false # Fails closed: no GitHub PR without manual approval

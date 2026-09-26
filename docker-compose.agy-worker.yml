@@ -1,5 +1,15 @@
 name: agy-worker
 
+# NOTE: Ephemeral Per-Job Container Architecture (Persistent Orchestrator):
+# For persistent feature worktrees, the MCP server does NOT execute Agy inside the long-running agy-worker container.
+# Instead, DockerAgyJobRunner dynamically creates an ephemeral container named `agy-job-{job_id}`:
+# - Image: ia-mcp-vps-agy-worker:local (strictly allowlisted)
+# - Mounts: ONLY the assigned worktree (<host_storage_root>/worktrees/...:/workspace:rw), agy-worker_agy_home:/home/agy, tmpfs /tmp
+# - Network: agy-worker_default (dedicated network allowing outbound Agy/Google access, no published ports)
+# - Security: user 10001:10001, read_only rootfs, cap_drop ALL, no-new-privileges, pids_limit 256
+# - Secrets / Host mounts: NONE (no docker.sock, no deploy keys, no /config, no /home/ubuntu)
+# The long-running agy-worker service below remains dedicated to legacy jobs and private repository execution.
+
 x-agy-security: &agy-security
   user: "10001:10001"
   read_only: true
