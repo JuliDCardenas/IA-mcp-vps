@@ -33,6 +33,10 @@ services:
       - /home/ubuntu:/mnt/stacks
       - /var/log:/mnt/host-logs:ro
 
+      # Almacenamiento persistente de trabajos de código (bases bare, worktrees y metadatos)
+      # Origen exacto en el host utilizado por el orquestador y DockerAgyJobRunner
+      - /home/ubuntu/.local/share/ia-mcp-vps/coding-jobs:/var/lib/coding-jobs
+
       # Permite consultar/reiniciar contenedores del host.
       # OJO: docker.sock equivale a mucho poder sobre el host; mantener allowlists estrictas.
       - /var/run/docker.sock:/var/run/docker.sock

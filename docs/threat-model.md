@@ -2,81 +2,68 @@
 
 ## Activos protegidos
 
-- VPS y socket Docker;
-- credenciales de GitHub, OAuth y Bearer tokens;
-- repositorios y rama `main`;
+- VPS y socket de Docker;
+- credenciales de GitHub, llaves SSH y tokens de acceso;
+- repositorios Git y rama protegida `main`;
+- repositorios base permanentes y worktrees de trabajo;
 - datos y configuración de producción;
-- contenido de los trabajos y sus resultados.
+- integridad del historial de revisiones y registros de auditoría.
 
-## Riesgos principales
+---
 
-1. Lectura o exfiltración de secretos.
-2. Cambios destructivos o escritura directa en `main`.
-3. Prompt injection desde archivos del repositorio.
-4. Ejecución de comandos arbitrarios.
-5. Escape por rutas relativas, symlinks o archivos especiales.
-6. Cambios sobre una revisión base obsoleta.
-7. Resultados o logs sin límites.
-8. Despliegue de cambios no aprobados.
-9. Agotamiento de CPU, memoria, almacenamiento o tokens.
+## Riesgos principales y mitigaciones
 
-## Mitigaciones
+### 1. Escritura directa o accidental en `main`
+- **Mitigación:** Todas las implementaciones generan ramas de características dedicadas (`feat/<alias>-<work_item_id>`). El orquestador y el validador rechazan explícitamente cualquier rama que coincida con `main` o la rama base. La publicación y PR se dirigen a ramas secundarias. **No existe ruta de código para merge directo ni despliegue automático.**
 
-### Contenedor Agy
+### 2. Exfiltración de secretos o credenciales
+- **Mitigación:**
+  - El entorno de Agy no recibe tokens de GitHub ni llaves SSH de publicación.
+  - La publicación se gestiona mediante un componente independiente (`BranchPromoter`).
+  - Escaneo automático mediante expresiones regulares antes de aprobar o publicar cambios (detecta `ghp_`, `AIza`, claves privadas, Bearer tokens).
+  - Los errores y salidas de consola son redactados y truncados a un tamaño acotado.
 
-- usuario no root `10001:10001`;
-- filesystem raíz read-only;
-- capabilities Linux eliminadas;
-- `no-new-privileges`;
-- sin Docker socket;
-- sin bind mounts del host;
-- `/workspace` montado read-only;
-- límites de procesos, memoria y CPU;
-- credenciales de GitHub ausentes.
+### 3. Prompt injection y manipulación desde repositorios no confiables
+- **Mitigación:** El contenido del repositorio se trata como datos pasivos no confiables. No se permite que instrucciones halladas en archivos modifiquen el flujo de orquestación, alteren comandos de prueba o eludan validaciones.
 
-### Contexto y agente
+### 4. Ejecución de comandos arbitrarios
+- **Mitigación:** Las pruebas automáticas se ejecutan exclusivamente a partir de la tupla fija `test_commands` definida en `RepositoryPolicy`. Ningún comando provisto por el usuario, por el repositorio o por Agy es aceptado. Todas las llamadas a `subprocess.run` usan listas de argumentos con `shell=False`.
 
-- contexto construido por scripts fijos;
-- exclusión de `.env`, secretos, credenciales y configuración local;
-- archivos tratados como datos no confiables;
-- salida JSON validada por esquema;
-- sin `--dangerously-skip-permissions`;
-- Agy no recibe shell ni comandos de promoción.
+### 5. Escape por rutas relativas, symlinks o traversal
+- **Mitigación:**
+  - Confinamiento estricto bajo `storage_root` usando `resolve().relative_to(...)`.
+  - Validación de identificadores con `SAFE_ID_PATTERN` (`^[A-Za-z0-9_-]{1,64}$`), rechazando `.`, `..` y separadores de ruta.
+  - Prohibición explícita de enlaces simbólicos (`os.path.islink`) tanto en worktrees como en archivos cambiados.
 
-### Aplicación de cambios
+### 6. Pérdida o corrupción de trabajo por colisiones o carreras
+- **Mitigación:**
+  - Escritura atómica de metadatos JSON (`_atomic_write_json`) usando identificadores de archivo resistentes a colisiones (`uuid4()`).
+  - Verificación estricta de fast-forward (`git merge-base --is-ancestor`) en refrescos de rama base.
+  - Reutilización idempotente de ramas y worktrees para revisiones sucesivas del mismo ítem de trabajo.
 
-- clon independiente por trabajo;
-- clon de la rama `main` actual para implementaciones;
-- captura obligatoria del SHA base;
-- rutas relativas allowlisted;
-- validación con `realpath`;
-- rechazo de symlinks;
-- máximo 20 archivos, 64 KiB por archivo y 512 KiB total;
-- escaneo de patrones de secretos;
-- validación de diff y sintaxis;
-- hashes SHA-256 por artefacto.
+### 7. Limpieza destructiva de trabajo no publicado o sucio
+- **Mitigación:**
+  - `coding_job_cleanup` ejecuta `git status --porcelain=v1` y rechaza la limpieza si existen cambios sin confirmar (`DirtyWorktreeError`).
+  - Rechaza la limpieza si los cambios no han sido aprobados y promovidos a PR (`UnpublishedChangesError`).
+  - No existe parámetro `force` para omitir estas salvaguardas.
+  - El repositorio bare base permanente nunca se elimina durante la limpieza de un worktree.
 
-### Promoción
+### 8. Comportamiento en ausencia de configuración (Fail-Closed)
+- **Mitigación:** Si las credenciales o configuración del promotor o de la API de GitHub no están presentes, `publish_branch` y `create_pull_request` fallan cerrado inmediatamente con `PromotionError`, impidiendo cualquier intento de comunicación insegura o degradación silenciosa.
 
-- Agy no hace commit ni push;
-- GitHub es la fuente de verdad;
-- Notion IA usa únicamente el GitHub MCP;
-- rama y PR antes de `main`;
-- revisión de criterios y checks;
-- aprobación explícita del usuario;
-- merge con `expectedHeadSha`;
-- despliegue posterior al merge aprobado.
+---
 
-## Riesgos residuales
+## Separación estricta de responsabilidades
 
-- El contexto enviado al modelo puede contener información interna no detectada por patrones simples.
-- El worker conserva salida a red para autenticación y operación de Agy.
-- Los patrones de secretos no sustituyen GitHub Secret Scanning ni revisión humana.
-- Las pruebas actuales son sintácticas y deben ampliarse por repositorio.
-- Los repositorios privados requieren un broker de lectura separado; nunca se debe montar una credencial privada dentro de Agy.
-
-## Reglas de respuesta
-
-- Fallar cerrado ante ruta, tamaño, secreto, symlink o esquema inválido.
-- No promover si el SHA base ya no es válido.
-- No declarar éxito de despliegue sin evidencia operacional.
+```text
+[Agy / Implementador]
+      ↓ (Solo escribe en su worktree asignado)
+[JobValidator]
+      ↓ (Valida commit base, diff, tipos, secretos, pruebas allowlisted -> report_hash)
+[Revisión Humana / Notion]
+      ↓ (Aprobación explícita con hash y commit base exactos)
+[BranchPromoter] (Componente independiente con credenciales)
+      ↓ (Push seguro sin --force)
+[GitHub PR Client]
+      ↓ (Abre PR para revisión y merge externo)
+```

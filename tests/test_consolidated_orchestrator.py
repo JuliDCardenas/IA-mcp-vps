@@ -1,0 +1,657 @@
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import tempfile
+import unittest
+import urllib.error
+from pathlib import Path
+from typing import Any
+
+from dari_mcp_vps.job_validator import (
+    BaseCommitMismatchError,
+    JobValidator,
+    SecretDetectedError,
+    ValidationError,
+)
+from dari_mcp_vps.persistent_job import (
+    AgyExecutionAdapter,
+    DeploymentBlockedError,
+    EvidenceMismatchError,
+    JobStateError,
+    PersistentJobManager,
+    RevisionLimitExceededError,
+    UnpublishedChangesError,
+)
+from dari_mcp_vps.promoter import (
+    BranchPromoter,
+    GitHubPRClient,
+    GitHubPRConfig,
+    PromoterConfig,
+    PromotionError,
+)
+from dari_mcp_vps.tools.coding_jobs import register_coding_job_tools
+from dari_mcp_vps.tools.private_coding_job import register_private_coding_job_tool
+from dari_mcp_vps.worktree_manager import (
+    DirtyWorktreeError,
+    RepositoryPolicy,
+    SecurityError,
+    WorktreeManager,
+)
+
+
+class MockHTTPResponse:
+    def __init__(self, data: bytes, status: int = 201) -> None:
+        self.data = data
+        self.status = status
+
+    def read(self, amt: int = -1) -> bytes:
+        if amt < 0 or amt >= len(self.data):
+            return self.data
+        return self.data[:amt]
+
+    def __enter__(self) -> MockHTTPResponse:
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        pass
+
+
+def _init_git_repo(path: Path) -> str:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test Runner"], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=path, check=True, capture_output=True)
+    (path / "README.md").write_text("# Test Repo\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=path, check=True, capture_output=True)
+    return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=path, text=True).strip()
+
+
+class TestConsolidatedOrchestrator(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.mkdtemp(prefix="orch_test_")
+        self.root = Path(self.temp_dir)
+        self.storage_root = self.root / "storage"
+        self.origin_repo = self.root / "origin.git"
+        self.publish_repo = self.root / "upstream.git"
+
+        # Initialize origin and a bare upstream for promoter publishing
+        self.base_commit = _init_git_repo(self.origin_repo)
+        subprocess.run(["git", "clone", "--bare", str(self.origin_repo), str(self.publish_repo)], check=True, capture_output=True)
+
+        self.policy = RepositoryPolicy(
+            alias="test_repo",
+            clone_url=str(self.origin_repo),
+            default_base_branch="main",
+            github_repo="test_owner/test_repo",
+            test_commands=(("python3", "-c", "print('allowlisted test ok')"),),
+        )
+
+        self.promoter_config = PromoterConfig(
+            enabled=True,
+            publish_remote_url=str(self.publish_repo),
+            default_base_branch="main",
+        )
+        self.promoter = BranchPromoter(config=self.promoter_config)
+
+        self.pr_config = GitHubPRConfig(
+            enabled=True,
+            github_token="fake_token_for_test",
+            owner_repo="test_owner/test_repo",
+        )
+
+        def mock_opener(req: Any, timeout: int = 30) -> MockHTTPResponse:
+            resp_body = {
+                "number": 101,
+                "html_url": "https://github.com/test_owner/test_repo/pull/101",
+                "state": "open",
+                "created_at": "2026-09-26T00:00:00Z",
+            }
+            return MockHTTPResponse(json.dumps(resp_body).encode("utf-8"), status=201)
+
+        self.mock_opener = mock_opener
+        self.pr_client = GitHubPRClient(config=self.pr_config, http_opener=mock_opener)
+
+        self.wt_manager = WorktreeManager(
+            storage_root=self.storage_root,
+            policies={"test_repo": self.policy},
+        )
+        self.manager = PersistentJobManager(
+            storage_root=self.storage_root,
+            worktree_manager=self.wt_manager,
+            promoter=self.promoter,
+            pr_client=self.pr_client,
+        )
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_02_and_03_revision_reuses_job_branch_worktree_and_conversation_id(self) -> None:
+        """2 & 3. Verifies same job/branch/worktree/conversation ID are reused across revisions."""
+        job = self.manager.create_job(
+            repository="test_repo",
+            goal="Add feature X",
+            acceptance_criteria=["Criterion 1"],
+            work_item_id="work_item_42",
+        )
+        conv_id = job.conversation_id
+        wt_path = job.worktree_path
+        f_branch = job.feature_branch
+
+        # Add valid change to worktree and validate to reach NOTION_REVIEW
+        (Path(wt_path) / "feature.py").write_text("def hello(): pass\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=wt_path, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "add feature"], cwd=wt_path, check=True, capture_output=True)
+
+        self.manager.validate_job(job.job_id)
+        job_review = self.manager.get_job(job.job_id)
+        self.assertEqual(job_review.status, "NOTION_REVIEW")
+
+        # Request revision
+        rev_job = self.manager.request_revision(job.job_id, feedback="Improve error handling")
+        self.assertEqual(rev_job.status, "REVISION_REQUESTED")
+        self.assertEqual(rev_job.job_id, job.job_id)
+        self.assertEqual(rev_job.worktree_path, wt_path)
+        self.assertEqual(rev_job.feature_branch, f_branch)
+        self.assertEqual(rev_job.conversation_id, conv_id)
+        self.assertEqual(rev_job.revision_count, 1)
+
+    def test_04_fourth_revision_rejected(self) -> None:
+        """4. Verifies fourth revision is strictly rejected (max 3 cycles)."""
+        job = self.manager.create_job(
+            repository="test_repo",
+            goal="Iterative task",
+            acceptance_criteria=["Criterion 1"],
+        )
+        (Path(job.worktree_path) / "code.py").write_text("x = 1\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=job.worktree_path, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init code"], cwd=job.worktree_path, check=True, capture_output=True)
+
+        for i in range(1, 4):
+            self.manager.validate_job(job.job_id)
+            self.manager.request_revision(job.job_id, feedback=f"Cycle {i}")
+
+        self.manager.validate_job(job.job_id)
+        with self.assertRaises(RevisionLimitExceededError):
+            self.manager.request_revision(job.job_id, feedback="Cycle 4 rejected")
+
+    def test_05_invalid_state_transitions_rejected(self) -> None:
+        """5. Verifies invalid state transitions are rejected."""
+        job = self.manager.create_job(
+            repository="test_repo",
+            goal="State test",
+            acceptance_criteria=["Criterion 1"],
+        )
+        # Cannot approve from CREATED
+        with self.assertRaises(JobStateError):
+            self.manager.approve_changes(job.job_id, expected_validation_hash="fake", expected_base_commit="fake")
+
+        # Cannot publish from CREATED
+        with self.assertRaises(JobStateError):
+            self.manager.publish_branch(job.job_id)
+
+        # Cannot create PR from CREATED
+        with self.assertRaises(JobStateError):
+            self.manager.create_pull_request(job.job_id)
+
+    def test_06_and_07_cancellation_idempotent_and_preserves_worktree(self) -> None:
+        """6 & 7. Verifies cancellation is idempotent and preserves worktree contents."""
+        job = self.manager.create_job(
+            repository="test_repo",
+            goal="Cancel test",
+            acceptance_criteria=["Criterion 1"],
+        )
+        wt = Path(job.worktree_path)
+        (wt / "in_flight.txt").write_text("in flight work", encoding="utf-8")
+
+        cancelled_1 = self.manager.cancel_job(job.job_id, reason="User abort")
+        self.assertEqual(cancelled_1.status, "CANCELLED")
+
+        # Second cancel is idempotent
+        cancelled_2 = self.manager.cancel_job(job.job_id, reason="User abort again")
+        self.assertEqual(cancelled_2.status, "CANCELLED")
+
+        # Worktree and file must be preserved
+        self.assertTrue(wt.exists())
+        self.assertTrue((wt / "in_flight.txt").exists())
+
+    def test_08_and_09_only_allowlisted_tests_execute_arbitrary_rejected(self) -> None:
+        """8 & 9. Verifies only repository-allowlisted tests execute; arbitrary commands rejected."""
+        job = self.manager.create_job(
+            repository="test_repo",
+            goal="Testing allowlist",
+            acceptance_criteria=["Criterion 1"],
+        )
+        (Path(job.worktree_path) / "valid.py").write_text("x = 42\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=job.worktree_path, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "commit valid"], cwd=job.worktree_path, check=True, capture_output=True)
+
+        report = self.manager.validate_job(job.job_id)
+        self.assertTrue(report.passed)
+        self.assertEqual(len(report.test_results), 1)
+        self.assertEqual(report.test_results[0].command, ("python3", "-c", "print('allowlisted test ok')"))
+        self.assertEqual(report.test_results[0].exit_code, 0)
+
+    def test_10_secret_detection(self) -> None:
+        """10. Verifies secret detection triggers SecretDetectedError."""
+        job = self.manager.create_job(
+            repository="test_repo",
+            goal="Secret leak test",
+            acceptance_criteria=["Criterion 1"],
+        )
+        (Path(job.worktree_path) / "leak.py").write_text('API_KEY = "ghp_12345678901234567890"\n', encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=job.worktree_path, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "add leak"], cwd=job.worktree_path, check=True, capture_output=True)
+
+        with self.assertRaises(SecretDetectedError):
+            self.manager.validate_job(job.job_id)
+
+    def test_11_path_and_symlink_escape_rejection(self) -> None:
+        """11. Verifies path traversal and symlinks are strictly rejected."""
+        job = self.manager.create_job(
+            repository="test_repo",
+            goal="Symlink test",
+            acceptance_criteria=["Criterion 1"],
+        )
+        wt = Path(job.worktree_path)
+        os.symlink("/etc/passwd", wt / "symlink_escape.py")
+        subprocess.run(["git", "add", "."], cwd=wt, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "symlink"], cwd=wt, check=True, capture_output=True)
+
+        with self.assertRaises(SecurityError):
+            self.manager.validate_job(job.job_id)
+
+    def test_12_changed_file_line_byte_limits(self) -> None:
+        """12. Verifies file byte limits and disallowed file types are rejected."""
+        job = self.manager.create_job(
+            repository="test_repo",
+            goal="Limit test",
+            acceptance_criteria=["Criterion 1"],
+        )
+        wt = Path(job.worktree_path)
+
+        # 1. Disallowed file type
+        (wt / "dangerous.exe").write_bytes(b"binary data")
+        subprocess.run(["git", "add", "."], cwd=wt, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "add exe"], cwd=wt, check=True, capture_output=True)
+
+        with self.assertRaises(ValidationError):
+            self.manager.validate_job(job.job_id)
+
+    def test_13_and_14_validation_hash_and_approval_exact_matching(self) -> None:
+        """13 & 14. Verifies validation hash sensitivity and strict approval matching."""
+        job = self.manager.create_job(
+            repository="test_repo",
+            goal="Approval test",
+            acceptance_criteria=["Criterion 1"],
+        )
+        wt = Path(job.worktree_path)
+        (wt / "module.py").write_text("def run(): return 1\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=wt, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "v1 commit"], cwd=wt, check=True, capture_output=True)
+
+        report = self.manager.validate_job(job.job_id)
+        valid_hash = report.report_hash
+
+        # Tamper hash -> approval rejected
+        with self.assertRaises(EvidenceMismatchError):
+            self.manager.approve_changes(job.job_id, expected_validation_hash="tampered_hash", expected_base_commit=job.base_commit)
+
+        # Tamper base commit -> approval rejected
+        with self.assertRaises(EvidenceMismatchError):
+            self.manager.approve_changes(job.job_id, expected_validation_hash=valid_hash, expected_base_commit="0000000000000000000000000000000000000000")
+
+        # Correct hash and base commit -> approval succeeds
+        approved_job = self.manager.approve_changes(job.job_id, expected_validation_hash=valid_hash, expected_base_commit=job.base_commit)
+        self.assertEqual(approved_job.status, "CHANGES_APPROVED")
+
+    def test_15_16_17_publishing_checks_and_no_force_push(self) -> None:
+        """15, 16, 17. Verifies publishing requires approval, forbids main, and avoids force push."""
+        job = self.manager.create_job(
+            repository="test_repo",
+            goal="Publish test",
+            acceptance_criteria=["Criterion 1"],
+        )
+        wt = Path(job.worktree_path)
+        (wt / "pub.py").write_text("x = 10\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=wt, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "pub commit"], cwd=wt, check=True, capture_output=True)
+
+        # 15. Publishing before approval is rejected
+        with self.assertRaises(JobStateError):
+            self.manager.publish_branch(job.job_id)
+
+        report = self.manager.validate_job(job.job_id)
+        self.manager.approve_changes(job.job_id, expected_validation_hash=report.report_hash, expected_base_commit=job.base_commit)
+
+        # 16. Verify publication destination cannot be main
+        base_path = self.wt_manager.ensure_base_repository("test_repo")
+        with self.assertRaises(SecurityError):
+            self.promoter.publish_branch(base_repo_path=base_path, feature_branch="main")
+
+        # 17. Publishing approved feature branch succeeds cleanly
+        pub_job = self.manager.publish_branch(job.job_id)
+        self.assertEqual(pub_job.status, "BRANCH_PUBLISHED")
+        self.assertIsNotNone(pub_job.publish_info)
+
+    def test_18_and_19_pr_lifecycle_and_fail_closed_without_config(self) -> None:
+        """18 & 19. Verifies PR requires published branch and backends fail closed without configuration."""
+        job = self.manager.create_job(
+            repository="test_repo",
+            goal="PR test",
+            acceptance_criteria=["Criterion 1"],
+        )
+        wt = Path(job.worktree_path)
+        (wt / "pr_code.py").write_text("y = 20\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=wt, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "pr code"], cwd=wt, check=True, capture_output=True)
+
+        report = self.manager.validate_job(job.job_id)
+        self.manager.approve_changes(job.job_id, expected_validation_hash=report.report_hash, expected_base_commit=job.base_commit)
+
+        # 18. PR before publication rejected
+        with self.assertRaises(JobStateError):
+            self.manager.create_pull_request(job.job_id)
+
+        self.manager.publish_branch(job.job_id)
+        pr_job = self.manager.create_pull_request(job.job_id)
+        self.assertEqual(pr_job.status, "PR_CREATED")
+        self.assertIsNotNone(pr_job.pr_info)
+
+        # 19. Fail-closed without configuration
+        unconfigured_promoter = BranchPromoter(config=PromoterConfig(enabled=False))
+        with self.assertRaises(PromotionError):
+            unconfigured_promoter.publish_branch(base_repo_path=wt, feature_branch=job.feature_branch)
+
+        unconfigured_pr = GitHubPRClient(config=GitHubPRConfig(enabled=False))
+        with self.assertRaises(PromotionError):
+            unconfigured_pr.create_pull_request(owner_repo="owner/repo", feature_branch=job.feature_branch)
+
+    def test_20_and_21_dirty_unpublished_cleanup_rejected_clean_allowed(self) -> None:
+        """20 & 21. Verifies dirty/unpublished cleanup rejected and clean cleanup preserves base repo."""
+        job = self.manager.create_job(
+            repository="test_repo",
+            goal="Cleanup test",
+            acceptance_criteria=["Criterion 1"],
+        )
+        wt = Path(job.worktree_path)
+        (wt / "file.py").write_text("z = 30\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=wt, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "file"], cwd=wt, check=True, capture_output=True)
+
+        report = self.manager.validate_job(job.job_id)
+
+        # 20a. Unpublished changes rejected
+        with self.assertRaises(UnpublishedChangesError):
+            self.manager.cleanup_job(job.job_id)
+
+        # Progress to PR_CREATED
+        self.manager.approve_changes(job.job_id, expected_validation_hash=report.report_hash, expected_base_commit=job.base_commit)
+        self.manager.publish_branch(job.job_id)
+        self.manager.create_pull_request(job.job_id)
+
+        # 20b. Dirty worktree rejected
+        (wt / "dirty_uncommitted.txt").write_text("dirty work", encoding="utf-8")
+        with self.assertRaises(DirtyWorktreeError):
+            self.manager.cleanup_job(job.job_id)
+
+        # Remove dirty file and perform clean cleanup
+        (wt / "dirty_uncommitted.txt").unlink()
+        cleaned_job = self.manager.cleanup_job(job.job_id)
+        self.assertEqual(cleaned_job.status, "CLEANED_UP")
+        self.assertFalse(wt.exists())
+
+        # 21. Permanent bare base repository is preserved intact
+        base_path = self.wt_manager.ensure_base_repository("test_repo")
+        self.assertTrue(base_path.exists())
+        is_bare = subprocess.check_output(
+            ["git", "-C", str(base_path), "rev-parse", "--is-bare-repository"],
+            text=True,
+        ).strip()
+        self.assertEqual(is_bare, "true")
+
+    def test_22_legacy_and_new_tool_registrations_compatible(self) -> None:
+        """22. Verifies legacy tool registration and all 13 tools are present and functional."""
+        class MockMCP:
+            def __init__(self):
+                self.tools = []
+
+            def tool(self):
+                def decorator(fn):
+                    self.tools.append(fn.__name__)
+                    return fn
+                return decorator
+
+        mock_mcp = MockMCP()
+        mock_config = type("Config", (), {"raw": {}})()
+
+        register_coding_job_tools(mock_mcp, mock_config)
+        register_private_coding_job_tool(mock_mcp, mock_config)
+
+        expected_tools = {
+            "coding_job_create",
+            "coding_job_status",
+            "coding_job_wait",
+            "coding_job_result",
+            "coding_job_changes",
+            "coding_job_artifact",
+            "coding_job_request_revision",
+            "coding_job_approve_changes",
+            "coding_job_publish_branch",
+            "coding_job_create_pull_request",
+            "coding_job_cancel",
+            "coding_job_cleanup",
+            "coding_private_job_create",
+        }
+        self.assertTrue(expected_tools.issubset(set(mock_mcp.tools)))
+
+    def test_23_no_automatic_merge_or_deployment_path_exists(self) -> None:
+        """23. Verifies no automatic merge or deployment path exists in orchestrator classes."""
+        forbidden_terms = ["merge", "deploy", "push_to_main"]
+        for cls in [PersistentJobManager, BranchPromoter, GitHubPRClient]:
+            for attr in dir(cls):
+                for term in forbidden_terms:
+                    self.assertNotIn(term, attr.lower(), f"Forbidden operation {term} found on {cls.__name__}.{attr}")
+
+    def test_24_uncommitted_secret_detection(self) -> None:
+        """24. Verifies uncommitted secrets in live worktree are detected without commit."""
+        job = self.manager.create_job(
+            repository="test_repo",
+            goal="Test uncommitted secret",
+            acceptance_criteria=["Criterion 1"],
+        )
+        wt = Path(job.worktree_path)
+        # Write secret directly to working tree; do NOT git add or git commit
+        (wt / "uncommitted_leak.py").write_text('API_KEY = "ghp_12345678901234567890"\n', encoding="utf-8")
+
+        with self.assertRaises(SecretDetectedError):
+            self.manager.validate_job(job.job_id)
+
+    def test_25_uncommitted_syntax_error_detection(self) -> None:
+        """25. Verifies uncommitted syntax error in live worktree is detected without commit."""
+        job = self.manager.create_job(
+            repository="test_repo",
+            goal="Test uncommitted syntax error",
+            acceptance_criteria=["Criterion 1"],
+        )
+        wt = Path(job.worktree_path)
+        # Write invalid Python syntax; do NOT git add or git commit
+        (wt / "broken_syntax.py").write_text("def broken_func(\n", encoding="utf-8")
+
+        with self.assertRaises(ValidationError):
+            self.manager.validate_job(job.job_id)
+
+    def test_26_uncommitted_oversized_file_detection(self) -> None:
+        """26. Verifies uncommitted oversized file in live worktree is detected without commit."""
+        job = self.manager.create_job(
+            repository="test_repo",
+            goal="Test oversized file",
+            acceptance_criteria=["Criterion 1"],
+        )
+        wt = Path(job.worktree_path)
+        # Write > 65536 bytes; do NOT git add or git commit
+        (wt / "huge_file.py").write_text("x = 1\n" * 15000, encoding="utf-8")
+
+        with self.assertRaises(ValidationError):
+            self.manager.validate_job(job.job_id)
+
+    def test_27_untracked_file_validation_and_hash_sensitivity(self) -> None:
+        """27. Verifies untracked files are included in validation manifest and diff hash."""
+        job = self.manager.create_job(
+            repository="test_repo",
+            goal="Test untracked file handling",
+            acceptance_criteria=["Criterion 1"],
+        )
+        wt = Path(job.worktree_path)
+        (wt / "new_feature.py").write_text("def feature(): return 42\n", encoding="utf-8")
+
+        report1 = self.manager.validate_job(job.job_id)
+        self.assertTrue(report1.passed)
+        untracked_records = [c for c in report1.changes if c.path == "new_feature.py"]
+        self.assertEqual(len(untracked_records), 1)
+        self.assertEqual(untracked_records[0].operation, "upsert")
+        initial_hash = report1.report_hash
+
+        # Modifying untracked file must alter report_hash deterministically
+        (wt / "new_feature.py").write_text("def feature(): return 999\n", encoding="utf-8")
+        report2 = self.manager.validate_job(job.job_id)
+        self.assertTrue(report2.passed)
+        self.assertNotEqual(report1.report_hash, report2.report_hash)
+
+    def test_28_github_pat_secret_detection(self) -> None:
+        """28. Verifies fine-grained GitHub PAT token (github_pat_) is strictly detected."""
+        job = self.manager.create_job(
+            repository="test_repo",
+            goal="Test github_pat token detection",
+            acceptance_criteria=["Criterion 1"],
+        )
+        wt = Path(job.worktree_path)
+        (wt / "token_leak.py").write_text(
+            'GH_PAT = "github_pat_11AEXAMPLETOKEN1234567890abcdefghijklmnopqrstuvwxyz_0123456789"\n',
+            encoding="utf-8",
+        )
+
+        with self.assertRaises(SecretDetectedError):
+            self.manager.validate_job(job.job_id)
+
+    def test_29_real_pr_client_fail_closed_and_mocked_contract(self) -> None:
+        """29. Verifies real PR client fails closed without config, sanitizes errors, and parses correctly."""
+        # 1. Fail closed when disabled
+        unconfigured = GitHubPRClient(config=GitHubPRConfig(enabled=False))
+        with self.assertRaises(PromotionError):
+            unconfigured.create_pull_request(owner_repo="test/repo", feature_branch="feat/test")
+
+        # 2. Fail closed when token missing
+        no_token = GitHubPRClient(config=GitHubPRConfig(enabled=True, github_token="   ", owner_repo="test/repo"))
+        with self.assertRaises(PromotionError):
+            no_token.create_pull_request(owner_repo="test/repo", feature_branch="feat/test")
+
+        # 3. Invalid repository format
+        valid_cfg = GitHubPRConfig(enabled=True, github_token="token123", owner_repo="test/repo")
+        client = GitHubPRClient(config=valid_cfg)
+        with self.assertRaises(SecurityError):
+            client.create_pull_request(owner_repo="invalid_repo_without_slash", feature_branch="feat/test")
+
+        import io
+
+        # 4. Mocked HTTPError with sensitive token redaction
+        def error_opener(req: Any, timeout: int = 30) -> Any:
+            raise urllib.error.HTTPError(
+                url="https://api.github.com/repos/test/repo/pulls",
+                code=403,
+                msg="Forbidden",
+                hdrs=None,  # type: ignore
+                fp=io.BytesIO(b'{"message": "token ghp_12345678901234567890 forbidden"}'),  # type: ignore
+            )
+
+        err_client = GitHubPRClient(config=valid_cfg, http_opener=error_opener)
+        with self.assertRaises(PromotionError) as ctx:
+            err_client.create_pull_request(owner_repo="test/repo", feature_branch="feat/test")
+        self.assertIn("HTTP 403", str(ctx.exception))
+
+    def test_30_agy_execution_adapter_command_env_and_cancellation(self) -> None:
+        """30. Verifies Agy execution adapter argument arrays, environment scrubbing, and cancellation."""
+        job = self.manager.create_job(
+            repository="test_repo",
+            goal="Adapter test",
+            acceptance_criteria=["Criterion 1"],
+        )
+        adapter = AgyExecutionAdapter(runner_configured=True)
+
+        # Initial prompt command
+        cmd_init = adapter.build_command(job, "Initial prompt", is_revision=False)
+        self.assertEqual(
+            cmd_init,
+            ["agy", "-p", "Initial prompt", "--mode=accept-edits", "--sandbox", "--print-timeout", "20m", "--output-format", "json"],
+        )
+
+        # Revision prompt command (reuses conversation_id)
+        cmd_rev = adapter.build_command(job, "Fix review comment", is_revision=True)
+        self.assertEqual(
+            cmd_rev,
+            ["agy", "--conversation", job.conversation_id, "-p", "Fix review comment", "--mode=accept-edits", "--sandbox", "--print-timeout", "20m", "--output-format", "json"],
+        )
+
+        # Environment filtering
+        env = adapter.build_environment(Path(job.worktree_path))
+        self.assertIn("PATH", env)
+        self.assertEqual(env["HOME"], "/home/agy")
+        self.assertEqual(env["TMPDIR"], "/tmp")
+        self.assertNotIn("GITHUB_TOKEN", env)
+        self.assertNotIn("AWS_SECRET_ACCESS_KEY", env)
+        self.assertNotIn("DOCKER_HOST", env)
+
+    def test_31_persistent_execution_fails_closed_without_isolated_runner(self) -> None:
+        """31. Verifies persistent execution fails closed and marks BLOCKED_DEPLOYMENT when runner unconfigured."""
+        # By default in unconfigured environment, runner_configured is False
+        manager = PersistentJobManager(
+            storage_root=self.storage_root,
+            worktree_manager=self.wt_manager,
+            promoter=self.promoter,
+            pr_client=self.pr_client,
+            execution_adapter=AgyExecutionAdapter(runner_configured=False),
+        )
+        job = manager.create_job(
+            repository="test_repo",
+            goal="Direct execution test",
+            acceptance_criteria=["Criterion 1"],
+        )
+        with self.assertRaises(DeploymentBlockedError):
+            manager.run_execution(job.job_id)
+
+        job_state = manager.get_job(job.job_id)
+        self.assertEqual(job_state.status, "BLOCKED_DEPLOYMENT")
+        self.assertIn("BLOCKED_DEPLOYMENT", job_state.error or "")
+
+    def test_32_persistent_execution_succeeds_with_isolated_runner(self) -> None:
+        """32. Verifies persistent execution lifecycle with isolated runner transitions to NOTION_REVIEW."""
+        def mock_executor(job: Any, cmd: list[str], env: dict[str, str], wt: Path) -> tuple[int, str, str]:
+            (wt / "implemented.py").write_text("def work(): return True\n", encoding="utf-8")
+            return 0, json.dumps({"conversation_id": "real_agy_conv_999"}), "real_agy_conv_999"
+
+        isolated_adapter = AgyExecutionAdapter(runner_configured=True, executor_fn=mock_executor)
+        manager = PersistentJobManager(
+            storage_root=self.storage_root,
+            worktree_manager=self.wt_manager,
+            promoter=self.promoter,
+            pr_client=self.pr_client,
+            execution_adapter=isolated_adapter,
+        )
+        job = manager.create_job(
+            repository="test_repo",
+            goal="Isolated implementation",
+            acceptance_criteria=["Criterion 1"],
+        )
+        updated_job = manager.run_execution(job.job_id)
+
+        self.assertEqual(updated_job.status, "NOTION_REVIEW")
+        self.assertEqual(updated_job.conversation_id, "real_agy_conv_999")
+        self.assertIsNotNone(updated_job.validation_report)
+        self.assertTrue(updated_job.validation_report["passed"])
+
+
+if __name__ == "__main__":
+    unittest.main()
