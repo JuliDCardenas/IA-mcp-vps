@@ -78,6 +78,7 @@ class BranchPromoter:
         base_repo_path: Path,
         feature_branch: str,
         custom_remote: str | None = None,
+        expected_commit_sha: str | None = None,
     ) -> PublishResult:
         # 1. Fail closed if promoter is not configured
         remote_url = custom_remote or self.config.publish_remote_url
@@ -94,7 +95,25 @@ class BranchPromoter:
         if feature_branch == "main" or feature_branch == self.config.default_base_branch:
             raise SecurityError(f"Feature branch cannot match protected base branch: {feature_branch}")
 
-        # 4. Push safely without force push
+        # 4. Verify branch ref equals expected_commit_sha if specified
+        if expected_commit_sha:
+            proc_rev = subprocess.run(
+                ["git", "-C", str(base_repo_path), "rev-parse", "--verify", f"refs/heads/{feature_branch}"],
+                capture_output=True,
+                text=True,
+                shell=False,
+                check=False,
+                timeout=TIMEOUT_GIT_SECONDS,
+            )
+            if proc_rev.returncode != 0:
+                raise PromotionError(f"Branch ref refs/heads/{feature_branch} not found in base repository")
+            actual_sha = proc_rev.stdout.strip()
+            if actual_sha != expected_commit_sha:
+                raise PromotionError(
+                    f"Branch ref refs/heads/{feature_branch} ({actual_sha}) does not match expected commit {expected_commit_sha}"
+                )
+
+        # 5. Push safely without force push
         # Fixed argument array: ["git", "push", remote, f"refs/heads/{branch}:refs/heads/{branch}"]
         refspec = f"refs/heads/{feature_branch}:refs/heads/{feature_branch}"
         push_cmd = ["git", "-C", str(base_repo_path), "push", remote_url, refspec]

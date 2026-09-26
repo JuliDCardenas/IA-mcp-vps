@@ -119,10 +119,14 @@ Solicita una revisión en modo persistente desde `NOTION_REVIEW`.
 Acción explícita requerida para aprobar cambios desde `NOTION_REVIEW`.
 - Requiere `expected_validation_hash` y `expected_base_commit`.
 - Rechaza evidencia desactualizada, commits base divergentes o modificaciones posteriores en el worktree.
+- Tras la revalidación exacta de evidencia y tests, crea exactamente un commit local en la rama de característica asignada con identidad determinista no secreta del orquestador y mensaje acotado generado por el servidor.
+- Persiste `approved_commit_sha` en el registro del trabajo y lo expone en `coding_job_result`.
+- Si la creación del commit falla, no transiciona a `CHANGES_APPROVED`.
 - Transiciona a `CHANGES_APPROVED`. **No publica nada.**
 
 ### 9. `coding_job_publish_branch`
 Acción explícita posterior a `CHANGES_APPROVED` que delega la publicación a un promotor independiente.
+- Requiere `approved_commit_sha` y verifica que `refs/heads/<feature_branch>` sea exactamente igual a `approved_commit_sha`.
 - Valida que la rama de destino no sea `main` ni la rama base protegida.
 - Ejecuta push estricto sin `--force` (`refs/heads/{branch}:refs/heads/{branch}`).
 - Agy no hereda credenciales de publicación.
@@ -141,13 +145,14 @@ Cancela de forma idempotente un trabajo activo.
 - Transiciona a `CANCELLED`.
 
 ### 12. `coding_job_cleanup`
-Limpia de forma segura el worktree asignado.
-- Idempotente.
-- Rechaza worktrees sucios con modificaciones no confirmadas (`DirtyWorktreeError`).
-- Rechaza limpieza de cambios no publicados o no aprobados (`UnpublishedChangesError`).
-- Rechaza limpieza de trabajos activos (`RUNNING`, `VALIDATING`, etc.).
-- Elimina únicamente el worktree y sus metadatos; **preserva intacto el repositorio bare base permanente**.
-- Sin parámetro de forzado (`force`).
+Limpia de forma segura e idempotente el worktree asignado.
+- Parámetros: `job_id: str`, `confirm_discard_unpublished: bool = false`.
+- Comportamiento por defecto (`confirm_discard_unpublished=false`): continúa rechazando worktrees sucios con modificaciones no confirmadas (`DirtyWorktreeError`), cambios no publicados (`UnpublishedChangesError`) y trabajos activos.
+- Descarte explícito (`confirm_discard_unpublished=true`): permitido exclusivamente para trabajos en estado terminal `CANCELLED` o `FAILED`.
+- Jamás permite descarte desde `CREATED`, `RUNNING`, `VALIDATING`, `NOTION_REVIEW`, `CHANGES_APPROVED`, `BRANCH_PUBLISHED` ni `PR_CREATED`.
+- Cuando está confirmado y el estado es permitido, elimina el worktree usando argumentos fijos de Git (`worktree remove --force`) únicamente para esa ruta validada confinada.
+- Preserva intacto el repositorio bare base permanente y todos los demás worktrees hermanos.
+- Registra el descarte explícito en la pista de auditoría.
 
 ---
 

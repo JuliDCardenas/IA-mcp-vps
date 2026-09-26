@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 import json
 import os
 import shutil
@@ -1044,6 +1045,396 @@ class TestConsolidatedOrchestrator(unittest.TestCase):
 
         # Confined to assigned worktree
         self.assertIn("confined to the assigned worktree", prompt.lower())
+
+    def test_43_approval_creates_exactly_one_commit_on_feature_branch_and_never_main(self) -> None:
+        """43. Proves approval creates exactly one local commit on feature branch, never main, and sets approved_commit_sha."""
+        job = self.manager.create_job(
+            repository="test_repo",
+            goal="Add payments module",
+            acceptance_criteria=["Criterion 1"],
+            work_item_id="work_43",
+        )
+        wt = Path(job.worktree_path)
+        # Edit file directly in worktree without git add or commit (production flow)
+        (wt / "payment.py").write_text("def process_payment(): return True\n", encoding="utf-8")
+
+        # Validate job
+        report = self.manager.validate_job(job.job_id)
+        self.assertTrue(report.passed)
+
+        # Baseline: feature branch is at base_commit before approval
+        base_path = self.wt_manager.ensure_base_repository("test_repo")
+        fb_ref_before = subprocess.check_output(
+            ["git", "-C", str(base_path), "rev-parse", f"refs/heads/{job.feature_branch}"],
+            text=True,
+        ).strip()
+        self.assertEqual(fb_ref_before, job.base_commit)
+
+        main_ref_before = subprocess.check_output(
+            ["git", "-C", str(base_path), "rev-parse", "refs/heads/main"],
+            text=True,
+        ).strip()
+        self.assertEqual(main_ref_before, job.base_commit)
+
+        # Approval gate
+        approved_job = self.manager.approve_changes(
+            job.job_id,
+            expected_validation_hash=report.report_hash,
+            expected_base_commit=job.base_commit,
+        )
+        self.assertEqual(approved_job.status, "CHANGES_APPROVED")
+        self.assertIsNotNone(approved_job.approved_commit_sha)
+
+        # 1. Exactly one local commit on the feature branch ahead of base_commit
+        commit_count = int(subprocess.check_output(
+            ["git", "-C", str(wt), "rev-list", "--count", f"{job.base_commit}..HEAD"],
+            text=True,
+        ).strip())
+        self.assertEqual(commit_count, 1)
+
+        # 2. Commit is on feature branch, NEVER main
+        main_ref_after = subprocess.check_output(
+            ["git", "-C", str(base_path), "rev-parse", "refs/heads/main"],
+            text=True,
+        ).strip()
+        self.assertEqual(main_ref_after, job.base_commit)
+
+        # 3. Base repo feature branch ref equals approved_commit_sha
+        fb_ref_after = subprocess.check_output(
+            ["git", "-C", str(base_path), "rev-parse", f"refs/heads/{job.feature_branch}"],
+            text=True,
+        ).strip()
+        self.assertEqual(fb_ref_after, approved_job.approved_commit_sha)
+
+        # 4. Worktree HEAD ref equals approved_commit_sha
+        wt_head = subprocess.check_output(
+            ["git", "-C", str(wt), "rev-parse", "HEAD"],
+            text=True,
+        ).strip()
+        self.assertEqual(wt_head, approved_job.approved_commit_sha)
+
+        # 5. Author/committer identity is deterministic orchestrator
+        author_name = subprocess.check_output(
+            ["git", "-C", str(wt), "log", "-1", "--format=%an"],
+            text=True,
+        ).strip()
+        self.assertEqual(author_name, "IA MCP Orchestrator")
+
+        # 6. Commit message is derived from work_item_id / goal
+        commit_subject = subprocess.check_output(
+            ["git", "-C", str(wt), "log", "-1", "--format=%s"],
+            text=True,
+        ).strip()
+        self.assertIn("work_43", commit_subject)
+        self.assertIn("Add payments module", commit_subject)
+
+        # 7. coding_job_result exposes approved_commit_sha
+        class MockMCP:
+            def __init__(self):
+                self.tools = {}
+            def tool(self):
+                def dec(fn):
+                    self.tools[fn.__name__] = fn
+                    return fn
+                return dec
+
+        mock_mcp = MockMCP()
+        mock_cfg = type("Config", (), {"raw": {"orchestrator": {"storage_root": str(self.storage_root)}}})()
+        register_coding_job_tools(mock_mcp, mock_cfg)
+        res = mock_mcp.tools["coding_job_result"](job.job_id)
+        self.assertEqual(res["approved_commit_sha"], approved_job.approved_commit_sha)
+
+    def test_44_publish_integrity_requires_approved_commit_sha_and_matching_ref(self) -> None:
+        """44. Proves publish_branch requires approved_commit_sha, matches branch ref, and avoids force push."""
+        job = self.manager.create_job(
+            repository="test_repo",
+            goal="Publication integrity test",
+            acceptance_criteria=["Criterion 1"],
+            work_item_id="work_44",
+        )
+        wt = Path(job.worktree_path)
+        (wt / "feature.py").write_text("def feat(): return 44\n", encoding="utf-8")
+        report = self.manager.validate_job(job.job_id)
+
+        # 1. Artificially put job in CHANGES_APPROVED without approved_commit_sha
+        d = asdict(job)
+        d["status"] = "CHANGES_APPROVED"
+        d["validation_report"] = asdict(report)
+        d["approved_commit_sha"] = None
+        self.manager._save_job(PersistentJobRecord(**d))
+
+        with self.assertRaises(JobStateError) as ctx:
+            self.manager.publish_branch(job.job_id)
+        self.assertIn("missing approved_commit_sha", str(ctx.exception))
+
+        # 2. Approve legitimately
+        d["status"] = "NOTION_REVIEW"
+        self.manager._save_job(PersistentJobRecord(**d))
+        approved_job = self.manager.approve_changes(
+            job.job_id,
+            expected_validation_hash=report.report_hash,
+            expected_base_commit=job.base_commit,
+        )
+        self.assertIsNotNone(approved_job.approved_commit_sha)
+
+        # 3. Tamper approved_commit_sha in job record -> publish rejected
+        d_tampered = asdict(approved_job)
+        d_tampered["approved_commit_sha"] = "0000000000000000000000000000000000000000"
+        self.manager._save_job(PersistentJobRecord(**d_tampered))
+
+        with self.assertRaises(EvidenceMismatchError):
+            self.manager.publish_branch(job.job_id)
+
+        # 4. Restore valid approved_commit_sha -> publish succeeds
+        self.manager._save_job(approved_job)
+        pub_job = self.manager.publish_branch(job.job_id)
+        self.assertEqual(pub_job.status, "BRANCH_PUBLISHED")
+        self.assertEqual(pub_job.publish_info["feature_branch"], job.feature_branch)
+
+    def test_45_default_dirty_cleanup_rejects_and_explicit_discard_works_only_for_cancelled_or_failed(self) -> None:
+        """45. Proves default dirty cleanup rejects and explicit discard works only for CANCELLED or FAILED."""
+        # --- Part A: CANCELLED job ---
+        job_c = self.manager.create_job(
+            repository="test_repo",
+            goal="Cancel discard test",
+            acceptance_criteria=["Criterion 1"],
+            work_item_id="work_cancel",
+        )
+        wt_c = Path(job_c.worktree_path)
+        (wt_c / "dirty_draft.py").write_text("in progress draft", encoding="utf-8")
+        self.manager.cancel_job(job_c.job_id)
+
+        # Default cleanup (flag omitted) rejects dirty worktree
+        with self.assertRaises(DirtyWorktreeError):
+            self.manager.cleanup_job(job_c.job_id)
+
+        # Default cleanup (flag=False) rejects dirty worktree
+        with self.assertRaises(DirtyWorktreeError):
+            self.manager.cleanup_job(job_c.job_id, confirm_discard_unpublished=False)
+
+        # Worktree still exists
+        self.assertTrue(wt_c.exists())
+
+        # Explicit discard with confirm_discard_unpublished=True succeeds
+        cleaned_c = self.manager.cleanup_job(job_c.job_id, confirm_discard_unpublished=True)
+        self.assertEqual(cleaned_c.status, "CLEANED_UP")
+        self.assertFalse(wt_c.exists())
+        self.assertTrue(any("Explicit discard confirmation accepted" in e["detail"] for e in cleaned_c.audit_events))
+
+        # --- Part B: FAILED job ---
+        job_f = self.manager.create_job(
+            repository="test_repo",
+            goal="Failed discard test",
+            acceptance_criteria=["Criterion 1"],
+            work_item_id="work_fail",
+        )
+        wt_f = Path(job_f.worktree_path)
+        (wt_f / "broken.py").write_text("def broken_syntax(\n", encoding="utf-8")
+        with self.assertRaises(ValidationError):
+            self.manager.validate_job(job_f.job_id)
+        self.assertEqual(self.manager.get_job(job_f.job_id).status, "FAILED")
+
+        # Default cleanup rejects dirty worktree
+        with self.assertRaises(DirtyWorktreeError):
+            self.manager.cleanup_job(job_f.job_id)
+
+        # Explicit discard succeeds
+        cleaned_f = self.manager.cleanup_job(job_f.job_id, confirm_discard_unpublished=True)
+        self.assertEqual(cleaned_f.status, "CLEANED_UP")
+        self.assertFalse(wt_f.exists())
+
+    def test_46_explicit_discard_cannot_operate_on_active_or_approved_or_published_jobs(self) -> None:
+        """46. Proves explicit discard cannot operate on CREATED, RUNNING, VALIDATING, NOTION_REVIEW, CHANGES_APPROVED, BRANCH_PUBLISHED, or PR_CREATED."""
+        # 1. CREATED
+        job = self.manager.create_job(
+            repository="test_repo",
+            goal="State check discard",
+            acceptance_criteria=["Criterion 1"],
+            work_item_id="work_states",
+        )
+        with self.assertRaises(JobStateError):
+            self.manager.cleanup_job(job.job_id, confirm_discard_unpublished=True)
+
+        wt = Path(job.worktree_path)
+        (wt / "valid.py").write_text("x = 1\n", encoding="utf-8")
+
+        # 2. RUNNING / VALIDATING
+        self.manager.transition_state(job.job_id, "RUNNING", "test")
+        with self.assertRaises(JobStateError):
+            self.manager.cleanup_job(job.job_id, confirm_discard_unpublished=True)
+
+        self.manager.transition_state(job.job_id, "VALIDATING", "test")
+        with self.assertRaises(JobStateError):
+            self.manager.cleanup_job(job.job_id, confirm_discard_unpublished=True)
+
+        # 3. NOTION_REVIEW
+        report = self.manager.validate_job(job.job_id)
+        self.assertEqual(self.manager.get_job(job.job_id).status, "NOTION_REVIEW")
+        with self.assertRaises(JobStateError):
+            self.manager.cleanup_job(job.job_id, confirm_discard_unpublished=True)
+
+        # 4. CHANGES_APPROVED
+        self.manager.approve_changes(job.job_id, expected_validation_hash=report.report_hash, expected_base_commit=job.base_commit)
+        self.assertEqual(self.manager.get_job(job.job_id).status, "CHANGES_APPROVED")
+        with self.assertRaises(JobStateError):
+            self.manager.cleanup_job(job.job_id, confirm_discard_unpublished=True)
+
+        # 5. BRANCH_PUBLISHED
+        self.manager.publish_branch(job.job_id)
+        self.assertEqual(self.manager.get_job(job.job_id).status, "BRANCH_PUBLISHED")
+        with self.assertRaises(JobStateError):
+            self.manager.cleanup_job(job.job_id, confirm_discard_unpublished=True)
+
+        # 6. PR_CREATED
+        self.manager.create_pull_request(job.job_id)
+        self.assertEqual(self.manager.get_job(job.job_id).status, "PR_CREATED")
+        with self.assertRaises(JobStateError):
+            self.manager.cleanup_job(job.job_id, confirm_discard_unpublished=True)
+
+    def test_47_base_clone_and_sibling_worktrees_remain_intact_during_explicit_discard(self) -> None:
+        """47. Proves base clone and sibling worktrees remain completely intact during explicit discard."""
+        job_a = self.manager.create_job(
+            repository="test_repo",
+            goal="Sibling A",
+            acceptance_criteria=["Criterion 1"],
+            work_item_id="sibling_a",
+        )
+        job_b = self.manager.create_job(
+            repository="test_repo",
+            goal="Sibling B",
+            acceptance_criteria=["Criterion 1"],
+            work_item_id="sibling_b",
+        )
+        wt_a = Path(job_a.worktree_path)
+        wt_b = Path(job_b.worktree_path)
+
+        (wt_a / "dirty_a.py").write_text("content A", encoding="utf-8")
+        (wt_b / "keep_b.py").write_text("content B", encoding="utf-8")
+
+        # Cancel job A and discard
+        self.manager.cancel_job(job_a.job_id)
+        self.manager.cleanup_job(job_a.job_id, confirm_discard_unpublished=True)
+
+        # Sibling B is completely intact
+        self.assertFalse(wt_a.exists())
+        self.assertTrue(wt_b.exists())
+        self.assertTrue((wt_b / "keep_b.py").exists())
+        self.assertEqual((wt_b / "keep_b.py").read_text(encoding="utf-8"), "content B")
+
+        # Base repository is completely intact and bare
+        base_path = self.wt_manager.ensure_base_repository("test_repo")
+        self.assertTrue(base_path.exists())
+        is_bare = subprocess.check_output(
+            ["git", "-C", str(base_path), "rev-parse", "--is-bare-repository"],
+            text=True,
+        ).strip()
+        self.assertEqual(is_bare, "true")
+
+    def test_48_cleanup_is_idempotent(self) -> None:
+        """48. Proves repeated cleanup calls on already cleaned up jobs are strictly idempotent."""
+        job = self.manager.create_job(
+            repository="test_repo",
+            goal="Idempotent cleanup test",
+            acceptance_criteria=["Criterion 1"],
+            work_item_id="work_48",
+        )
+        wt = Path(job.worktree_path)
+        (wt / "dirty.txt").write_text("dirty", encoding="utf-8")
+        self.manager.cancel_job(job.job_id)
+
+        # First cleanup
+        c1 = self.manager.cleanup_job(job.job_id, confirm_discard_unpublished=True)
+        self.assertEqual(c1.status, "CLEANED_UP")
+
+        # Second cleanup with True
+        c2 = self.manager.cleanup_job(job.job_id, confirm_discard_unpublished=True)
+        self.assertEqual(c2.status, "CLEANED_UP")
+
+        # Third cleanup with False
+        c3 = self.manager.cleanup_job(job.job_id, confirm_discard_unpublished=False)
+        self.assertEqual(c3.status, "CLEANED_UP")
+
+    def test_49_tool_contract_exposes_confirm_discard_unpublished_false_by_default(self) -> None:
+        """49. Proves tool contract exposes confirm_discard_unpublished=false by default and rejects dirty worktree without it."""
+        import inspect
+
+        class MockMCP:
+            def __init__(self):
+                self.tools = {}
+            def tool(self):
+                def dec(fn):
+                    self.tools[fn.__name__] = fn
+                    return fn
+                return dec
+
+        mock_mcp = MockMCP()
+        mock_cfg = type("Config", (), {"raw": {"orchestrator": {"storage_root": str(self.storage_root)}}})()
+        register_coding_job_tools(mock_mcp, mock_cfg)
+
+        fn = mock_mcp.tools["coding_job_cleanup"]
+        sig = inspect.signature(fn)
+
+        # 1. Parameter confirm_discard_unpublished is present
+        self.assertIn("confirm_discard_unpublished", sig.parameters)
+        param = sig.parameters["confirm_discard_unpublished"]
+        # 2. Default value is False
+        self.assertIs(param.default, False)
+
+        # 3. Test execution via tool contract
+        job = self.manager.create_job(
+            repository="test_repo",
+            goal="Tool contract cleanup test",
+            acceptance_criteria=["Criterion 1"],
+            work_item_id="work_49",
+        )
+        wt = Path(job.worktree_path)
+        (wt / "dirty_mcp.py").write_text("uncommitted file", encoding="utf-8")
+        self.manager.cancel_job(job.job_id)
+
+        with unittest.mock.patch.dict("dari_mcp_vps.worktree_manager.DEFAULT_REPOSITORY_POLICIES", {"test_repo": self.policy}):
+            # Invoking without confirm_discard_unpublished uses default False and rejects
+            with self.assertRaises(DirtyWorktreeError):
+                fn(job.job_id)
+
+            # Invoking with confirm_discard_unpublished=True succeeds
+            res = fn(job.job_id, confirm_discard_unpublished=True)
+            self.assertEqual(res["status"], "CLEANED_UP")
+
+    def test_50_backward_compatibility_stored_jobs_without_approved_commit_sha(self) -> None:
+        """50. Proves legacy stored jobs without approved_commit_sha deserialize safely."""
+        job = self.manager.create_job(
+            repository="test_repo",
+            goal="Backward compat test",
+            acceptance_criteria=["Criterion 1"],
+            work_item_id="work_50",
+        )
+        # Manually alter the JSON on disk to strip approved_commit_sha
+        job_file = self.manager._job_file(job.job_id)
+        with open(job_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        data.pop("approved_commit_sha", None)
+        with open(job_file, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+
+        # Load job deserialization
+        loaded = self.manager.get_job(job.job_id)
+        self.assertIsNone(loaded.approved_commit_sha)
+
+        # coding_job_result tool exposes None safely
+        class MockMCP:
+            def __init__(self):
+                self.tools = {}
+            def tool(self):
+                def dec(fn):
+                    self.tools[fn.__name__] = fn
+                    return fn
+                return dec
+
+        mock_mcp = MockMCP()
+        mock_cfg = type("Config", (), {"raw": {"orchestrator": {"storage_root": str(self.storage_root)}}})()
+        register_coding_job_tools(mock_mcp, mock_cfg)
+        res = mock_mcp.tools["coding_job_result"](job.job_id)
+        self.assertIsNone(res["approved_commit_sha"])
 
 
 if __name__ == "__main__":
