@@ -217,6 +217,66 @@ class TestWorktreeManager(unittest.TestCase):
         }
         self.assertTrue(expected_tools.issubset(set(mock_mcp.tools)))
 
+    def test_12_new_workspace_refreshes_base_while_active_remains_unchanged(self) -> None:
+        """12. Verifies that creating a new workspace refreshes base while active workspaces remain unchanged."""
+        # 1. create workspace A
+        ws_a = self.manager.get_or_create_workspace("test_repo", "task_a")
+        self.assertEqual(ws_a.base_commit, self.initial_commit)
+        commit_a_head = subprocess.check_output(
+            ["git", "-C", ws_a.worktree_path, "rev-parse", "HEAD"],
+            text=True,
+        ).strip()
+        self.assertEqual(commit_a_head, self.initial_commit)
+
+        # 2. advance the remote main fast-forward
+        (self.remote_origin / "advance.txt").write_text("fast forward content", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.remote_origin, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Remote advance"], cwd=self.remote_origin, check=True, capture_output=True)
+        remote_c2 = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.remote_origin, text=True).strip()
+        self.assertNotEqual(remote_c2, self.initial_commit)
+
+        # 3. create workspace B
+        ws_b = self.manager.get_or_create_workspace("test_repo", "task_b")
+
+        # 4. prove workspace B uses the new commit
+        self.assertEqual(ws_b.base_commit, remote_c2)
+        commit_b_head = subprocess.check_output(
+            ["git", "-C", ws_b.worktree_path, "rev-parse", "HEAD"],
+            text=True,
+        ).strip()
+        self.assertEqual(commit_b_head, remote_c2)
+        self.assertTrue((Path(ws_b.worktree_path) / "advance.txt").exists())
+
+        # 5. prove workspace A remains unchanged
+        ws_a_reused = self.manager.get_or_create_workspace("test_repo", "task_a")
+        self.assertEqual(ws_a_reused.base_commit, self.initial_commit)
+        self.assertEqual(ws_a_reused.worktree_path, ws_a.worktree_path)
+        self.assertEqual(ws_a_reused.feature_branch, ws_a.feature_branch)
+        commit_a_reused_head = subprocess.check_output(
+            ["git", "-C", ws_a.worktree_path, "rev-parse", "HEAD"],
+            text=True,
+        ).strip()
+        self.assertEqual(commit_a_reused_head, self.initial_commit)
+        self.assertFalse((Path(ws_a.worktree_path) / "advance.txt").exists())
+
+    def test_13_new_workspace_rejects_divergent_non_fast_forward_base(self) -> None:
+        """13. Verifies that creating a new workspace rejects remote non-fast-forward base divergence."""
+        # 1. Advance remote origin with commit A and create workspace A (which refreshes base to commit A)
+        (self.remote_origin / "commit_a.txt").write_text("commit a", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.remote_origin, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Commit A"], cwd=self.remote_origin, check=True, capture_output=True)
+        self.manager.get_or_create_workspace("test_repo", "task_a")
+
+        # 2. Force reset remote origin back to initial commit and make divergent Commit B
+        subprocess.run(["git", "reset", "--hard", self.initial_commit], cwd=self.remote_origin, check=True, capture_output=True)
+        (self.remote_origin / "commit_b.txt").write_text("commit b divergent", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.remote_origin, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Commit B divergent"], cwd=self.remote_origin, check=True, capture_output=True)
+
+        # 3. Creating a new workspace now must reject the divergent non-fast-forward base
+        with self.assertRaises(NonFastForwardError):
+            self.manager.get_or_create_workspace("test_repo", "task_divergent")
+
 
 if __name__ == "__main__":
     unittest.main()

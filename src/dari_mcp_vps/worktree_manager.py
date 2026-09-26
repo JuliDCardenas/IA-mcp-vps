@@ -303,9 +303,6 @@ class WorktreeManager:
             except (json.JSONDecodeError, KeyError):
                 pass
 
-        base_path = self.ensure_base_repository(clean_alias)
-        current_base_commit = _run_git(["rev-parse", f"refs/heads/{target_base}"], cwd=base_path)
-
         # Server-generated feature branch MUST differ from main and base branch
         feature_branch = f"feat/{clean_alias}-{clean_id}"
         if feature_branch == target_base or feature_branch == "main":
@@ -316,6 +313,12 @@ class WorktreeManager:
                 raise SecurityError(f"Symlinks are forbidden at worktree target: {worktree_dir}")
             # If directory exists without active metadata, reject collision
             raise WorktreeManagerError(f"Worktree destination path already exists and cannot be overwritten: {worktree_dir}")
+
+        # When creating a NEW workspace, safely refresh the base repository
+        # before reading the base commit and creating the feature branch.
+        self.refresh_base_repository(clean_alias, target_base)
+        base_path = self._base_repo_path(clean_alias)
+        current_base_commit = _run_git(["rev-parse", f"refs/heads/{target_base}"], cwd=base_path)
 
         worktree_dir.parent.mkdir(parents=True, exist_ok=True)
 

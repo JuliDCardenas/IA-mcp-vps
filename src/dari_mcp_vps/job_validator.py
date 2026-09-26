@@ -52,6 +52,9 @@ class EmptyImplementationError(ValidationError):
     """Raised when an implementation job produces zero changed files."""
 
 
+IMPLEMENTATION_TASK_TYPES: frozenset[str] = frozenset({"implement", "implementation"})
+
+
 class SecretDetectedError(ValidationError):
     """Raised when sensitive credentials or secret patterns are discovered."""
 
@@ -310,8 +313,10 @@ class JobValidator:
         if len(changes) > MAX_CHANGED_FILES:
             raise ValidationError(f"Too many changed files: {len(changes)} > {MAX_CHANGED_FILES}")
 
+        clean_task_type = (task_type or "").strip().lower()
+
         # Empty implementation rejection: implementation jobs must produce changed files
-        if task_type == "implement" and len(changes) == 0:
+        if clean_task_type in IMPLEMENTATION_TASK_TYPES and len(changes) == 0:
             raise EmptyImplementationError(
                 "Implementation produced zero changed files: worktree contains no changes relative to base commit"
             )
