@@ -933,6 +933,118 @@ class TestConsolidatedOrchestrator(unittest.TestCase):
         self.assertEqual(loaded.goal, "Legacy job without new fields")
         self.assertEqual(loaded.status, "NOTION_REVIEW")
 
+    def test_40_implementation_task_type_zero_changes_rejected_cannot_reach_notion_review(self) -> None:
+        """40. Proves task_type='implementation' with exit code 0 and zero changes fails validation and cannot reach NOTION_REVIEW."""
+        def zero_change_executor(job: Any, cmd: list[str], env: dict[str, str], wt: Path) -> tuple[int, str, str]:
+            return 0, "Agy attempted RunCommand, was denied by sandbox, and exited 0 without producing any file modifications.", "conv_zero_changes_40"
+
+        isolated_adapter = AgyExecutionAdapter(runner_configured=True, executor_fn=zero_change_executor)
+        manager = PersistentJobManager(
+            storage_root=self.storage_root,
+            worktree_manager=self.wt_manager,
+            promoter=self.promoter,
+            pr_client=self.pr_client,
+            execution_adapter=isolated_adapter,
+        )
+        job = manager.create_job(
+            repository="test_repo",
+            goal="Implement database connection pooling",
+            acceptance_criteria=["Connection pool must support 10 max connections"],
+            task_type="implementation",
+        )
+
+        with self.assertRaises(EmptyImplementationError) as ctx:
+            manager.run_execution(job.job_id)
+
+        self.assertIn("zero changed files", str(ctx.exception).lower())
+
+        stored = manager.get_job(job.job_id)
+        # Validation ends in FAILED with EmptyImplementationError
+        self.assertEqual(stored.status, "FAILED")
+        self.assertEqual(stored.exit_code, 0)
+        self.assertIn("zero changed files", (stored.error or "").lower())
+        # It cannot reach NOTION_REVIEW
+        self.assertNotEqual(stored.status, "NOTION_REVIEW")
+        self.assertIsNone(stored.validation_report)
+
+    def test_41_task_type_normalization_and_audit_behavior(self) -> None:
+        """41. Proves task_type normalization (strip/lower) treats implement and implementation identically while preserving audit zero-change behavior."""
+        def noop_executor(job: Any, cmd: list[str], env: dict[str, str], wt: Path) -> tuple[int, str, str]:
+            return 0, "No changes made", "conv_noop_41"
+
+        isolated_adapter = AgyExecutionAdapter(runner_configured=True, executor_fn=noop_executor)
+        manager = PersistentJobManager(
+            storage_root=self.storage_root,
+            worktree_manager=self.wt_manager,
+            promoter=self.promoter,
+            pr_client=self.pr_client,
+            execution_adapter=isolated_adapter,
+        )
+
+        # Variant 1: " IMPLEMENTATION  "
+        job1 = manager.create_job(
+            repository="test_repo",
+            goal="Variant 1",
+            acceptance_criteria=["Criterion 1"],
+            task_type=" IMPLEMENTATION  ",
+        )
+        self.assertEqual(job1.task_type, "implementation")
+        with self.assertRaises(EmptyImplementationError):
+            manager.run_execution(job1.job_id)
+        self.assertEqual(manager.get_job(job1.job_id).status, "FAILED")
+
+        # Variant 2: " Implement "
+        job2 = manager.create_job(
+            repository="test_repo",
+            goal="Variant 2",
+            acceptance_criteria=["Criterion 2"],
+            task_type=" Implement ",
+        )
+        self.assertEqual(job2.task_type, "implement")
+        with self.assertRaises(EmptyImplementationError):
+            manager.run_execution(job2.job_id)
+        self.assertEqual(manager.get_job(job2.job_id).status, "FAILED")
+
+        # Direct JobValidator unit check with both task types
+        wt = Path(job1.worktree_path)
+        validator = JobValidator(worktree_dir=wt, storage_root=self.storage_root)
+        with self.assertRaises(EmptyImplementationError):
+            validator.validate(base_commit=job1.base_commit, feature_branch=job1.feature_branch, task_type="implementation")
+        with self.assertRaises(EmptyImplementationError):
+            validator.validate(base_commit=job1.base_commit, feature_branch=job1.feature_branch, task_type="implement")
+        with self.assertRaises(EmptyImplementationError):
+            validator.validate(base_commit=job1.base_commit, feature_branch=job1.feature_branch, task_type=" IMPLEMENT ")
+
+        # Read-only / audit tasks preserve zero-change behavior
+        audit_rep = validator.validate(base_commit=job1.base_commit, feature_branch=job1.feature_branch, task_type="audit")
+        self.assertTrue(audit_rep.passed)
+        self.assertEqual(len(audit_rep.changes), 0)
+
+    def test_42_explicit_no_shell_and_scoped_file_tools_in_prompt(self) -> None:
+        """42. Proves implementation prompt explicitly prohibits RunCommand/shell execution and instructs scoped file tools."""
+        job = self.manager.create_job(
+            repository="test_repo",
+            goal="Refactor session handling",
+            acceptance_criteria=["Strict timeout on tokens"],
+            constraints=["No external dependencies"],
+            task_type="implementation",
+        )
+        prompt = self.manager.build_initial_prompt(job)
+
+        # Prohibits RunCommand and shell execution
+        self.assertIn("RunCommand", prompt)
+        self.assertIn("shell execution", prompt.lower())
+        self.assertIn("strictly prohibited", prompt.lower())
+
+        # Instructs scoped file tools
+        self.assertIn("view_file", prompt)
+        self.assertIn("list_directory", prompt)
+        self.assertIn("write_to_file", prompt)
+        self.assertIn("replace_file_content", prompt)
+
+        # Confined to assigned worktree
+        self.assertIn("confined to the assigned worktree", prompt.lower())
+
 
 if __name__ == "__main__":
     unittest.main()
