@@ -36,6 +36,14 @@ from dari_mcp_vps.v2.token_broker import (
     TokenBrokerError,
     redact_secrets,
 )
+from dari_mcp_vps.v2.mechanical import (
+    ConfinedMechanicalOperations,
+    MechanicalOperationResult,
+)
+from dari_mcp_vps.v2.worktrees import (
+    GitHubNativeWorktreeManager,
+    SelectedRepository,
+)
 
 __all__ = [
     "RepositoryIdentity", "RepositoryIdentityError", "InvalidRepositoryFormatError",
@@ -47,4 +55,6 @@ __all__ = [
     "DiscoveryError", "DiscoveryAuthenticationError", "DiscoveryPermissionError",
     "InstallationNotFoundError", "DiscoveryResponseError", "RepositoryPolicyV2",
     "RepositoryPolicyRegistry", "build_conservative_policy",
+    "ConfinedMechanicalOperations", "MechanicalOperationResult",
+    "GitHubNativeWorktreeManager", "SelectedRepository",
 ]

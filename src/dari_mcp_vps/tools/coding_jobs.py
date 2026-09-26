@@ -21,6 +21,10 @@ from dari_mcp_vps.docker_runner import (
 from dari_mcp_vps.persistent_job import PersistentJobManager
 from dari_mcp_vps.promoter import BranchPromoter, GitHubPRClient
 from dari_mcp_vps.worktree_manager import WorktreeManager
+from dari_mcp_vps.v2.policy import RepositoryPolicyRegistry
+from dari_mcp_vps.v2.discovery import GitHubRepositoryCatalog
+from dari_mcp_vps.v2.token_broker import GitHubAppTokenBroker
+from dari_mcp_vps.v2.worktrees import GitHubNativeWorktreeManager
 
 DOCKER_SOCK = "/var/run/docker.sock"
 WORKER_CONTAINER = "agy-worker"
@@ -212,8 +216,31 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
         nonlocal _mgr_instance
         if _mgr_instance is None:
             root = _storage_root()
-            worktree_mgr = WorktreeManager(storage_root=root)
             orchestrator_cfg = getattr(app_config, "raw", {}).get("orchestrator", {})
+            native_cfg = orchestrator_cfg.get("github_native", {})
+            native_enabled = isinstance(native_cfg, dict) and bool(native_cfg.get("enabled", False))
+            if native_enabled:
+                registry = RepositoryPolicyRegistry(config_source=getattr(app_config, "raw", {}))
+                injected_broker = getattr(app_config, "github_token_broker", None)
+                broker = injected_broker or GitHubAppTokenBroker(
+                    app_id=native_cfg.get("app_id"),
+                    private_key=native_cfg.get("private_key_path") or native_cfg.get("private_key"),
+                    api_base_url=native_cfg.get("api_base_url", "https://api.github.com"),
+                )
+                catalog = GitHubRepositoryCatalog(
+                    token_broker=broker,
+                    allowed_owners=registry.allowed_owners,
+                    allowed_installations=registry.allowed_installations,
+                    api_base_url=native_cfg.get("api_base_url", "https://api.github.com"),
+                )
+                worktree_mgr = GitHubNativeWorktreeManager(
+                    storage_root=root,
+                    policy_registry=registry,
+                    token_broker=broker,
+                    repository_catalog=catalog,
+                )
+            else:
+                worktree_mgr = WorktreeManager(storage_root=root)
             runner_enabled = bool(orchestrator_cfg.get("runner_enabled", False))
             if not runner_enabled and os.getenv("IA_CODING_JOB_RUNNER_ENABLED", "0").lower() in ("1", "true", "yes"):
                 runner_enabled = True
@@ -231,10 +258,17 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
                 timeout_seconds=int(orchestrator_cfg.get("timeout_seconds", 1200)),
             )
             runner = DockerAgyJobRunner(config=runner_cfg)
+            formatter_cfg = orchestrator_cfg.get("formatters", {})
+            mechanical_formatters = {
+                str(name): tuple(str(part) for part in command)
+                for name, command in formatter_cfg.items()
+                if isinstance(command, (list, tuple)) and command
+            } if isinstance(formatter_cfg, dict) else {}
             _mgr_instance = PersistentJobManager(
                 storage_root=root,
                 worktree_manager=worktree_mgr,
                 execution_adapter=runner,
+                mechanical_formatters=mechanical_formatters,
             )
         return _mgr_instance
 
@@ -253,6 +287,36 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
         return _read_json(job_id, "job.json")
 
     @mcp.tool()
+    def coding_repository_list(
+        installation_id: int,
+        page: int = 1,
+        per_page: int = 100,
+        query: str = "",
+    ) -> dict[str, Any]:
+        """List GitHub App repositories authorized for dynamic coding jobs."""
+        manager = _get_mgr().worktree_manager
+        if not isinstance(manager, GitHubNativeWorktreeManager) or manager.repository_catalog is None:
+            raise ValueError("GitHub-native repository discovery is not enabled")
+        result = manager.repository_catalog.list_repositories(
+            installation_id=installation_id,
+            page=page,
+            per_page=per_page,
+        )
+        needle = query.strip().lower()
+        repositories = [
+            repo.to_dict()
+            for repo in result.repositories
+            if not needle or needle in repo.canonical.lower()
+        ]
+        return {
+            "repositories": repositories,
+            "total_count": result.total_count,
+            "page": result.page,
+            "per_page": result.per_page,
+            "has_next_page": result.has_next_page,
+        }
+
+    @mcp.tool()
     def coding_job_create(
         repository: str,
         task_type: str,
@@ -262,6 +326,7 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
         base_branch: str = "main",
         work_item_id: str | None = None,
         execution_mode: str = "legacy",
+        installation_id: int | None = None,
     ) -> dict[str, Any]:
         """Create a bounded asynchronous Agy audit or isolated implementation job."""
         if execution_mode == "persistent" or work_item_id is not None:
@@ -274,14 +339,27 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
             constraints_clean = _validate_text_list("constraints", constraints)
 
             mgr = _get_mgr()
+            repository_for_job = repository
+            repository_identity = repository
+            if "/" in repository:
+                if not isinstance(mgr.worktree_manager, GitHubNativeWorktreeManager):
+                    raise ValueError("GitHub-native repository selection is not enabled")
+                if installation_id is None:
+                    raise ValueError("installation_id is required for GitHub-native repositories")
+                selected = mgr.worktree_manager.select_repository(repository, installation_id)
+                repository_for_job = selected.runtime_alias
+                repository_identity = selected.canonical
+
             job = mgr.create_job(
-                repository=repository,
+                repository=repository_for_job,
                 goal=goal,
                 acceptance_criteria=criteria,
                 constraints=constraints_clean,
                 base_branch=base_branch,
                 work_item_id=work_item_id,
                 task_type=task_type,
+                repository_identity=repository_identity,
+                installation_id=installation_id,
             )
             try:
                 job = mgr.run_execution(job.job_id)
@@ -291,7 +369,7 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
             return {
                 "job_id": job.job_id,
                 "status": job.status,
-                "repository": job.repository,
+                "repository": job.repository_identity or job.repository,
                 "task_type": job.task_type,
                 "work_item_id": job.work_item_id,
                 "feature_branch": job.feature_branch,
@@ -443,6 +521,35 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
         except Exception:
             job = mgr.get_job(job_id)
         return asdict(job)
+
+    @mcp.tool()
+    def coding_job_validate_only(job_id: str) -> dict[str, Any]:
+        """Run deterministic validation for an existing persistent job without Agy."""
+        _validate_job_id(job_id)
+        report = _get_mgr().validate_only(job_id)
+        return asdict(report)
+
+    @mcp.tool()
+    def coding_job_apply_mechanical_operation(
+        job_id: str,
+        operation: str,
+        path: str = "",
+        formatter: str = "",
+        revalidate: bool = True,
+    ) -> dict[str, Any]:
+        """Delete, normalize, or format inside one worktree without invoking Agy."""
+        _validate_job_id(job_id)
+        result, report = _get_mgr().apply_mechanical_operation(
+            job_id=job_id,
+            operation=operation,
+            path=path,
+            formatter=formatter,
+            revalidate=revalidate,
+        )
+        return {
+            "operation": asdict(result),
+            "validation": asdict(report) if report is not None else None,
+        }
 
     @mcp.tool()
     def coding_job_approve_changes(
