@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import json
+import base64
+import os
 import re
+import subprocess
+import tempfile
+import time
 import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
@@ -199,7 +204,54 @@ class GitHubAppTokenBroker(InstallationTokenBroker):
             return self.jwt_signer(self.app_id)
         if not self.is_configured:
             raise TokenBrokerConfigError("GitHub App credentials (app_id/private_key) are not configured (fail-closed)")
-        raise TokenBrokerConfigError("Live RS256 JWT signing requires injectable jwt_signer or cryptographic dependency")
+        header = {"alg": "RS256", "typ": "JWT"}
+        now = int(time.time())
+        payload = {"iat": now - 60, "exp": now + 540, "iss": self.app_id}
+
+        def encode(value: dict[str, Any]) -> str:
+            raw = json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
+            return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+        signing_input = f"{encode(header)}.{encode(payload)}"
+        key_path: str | None = None
+        temporary_path: str | None = None
+        try:
+            if isinstance(self.private_key, bytes) or (
+                isinstance(self.private_key, str) and "BEGIN" in self.private_key
+            ):
+                raw_key = (
+                    self.private_key
+                    if isinstance(self.private_key, bytes)
+                    else self.private_key.encode("utf-8")
+                )
+                with tempfile.NamedTemporaryFile(mode="wb", delete=False) as tmp:
+                    tmp.write(raw_key)
+                    temporary_path = tmp.name
+                os.chmod(temporary_path, 0o600)
+                key_path = temporary_path
+            elif isinstance(self.private_key, str):
+                key_path = self.private_key
+            if not key_path:
+                raise TokenBrokerConfigError("GitHub App private key is invalid")
+            proc = subprocess.run(
+                ["openssl", "dgst", "-sha256", "-sign", key_path],
+                input=signing_input.encode("ascii"),
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            if proc.returncode != 0:
+                raise TokenBrokerConfigError("GitHub App JWT signing failed")
+            signature = base64.urlsafe_b64encode(proc.stdout).rstrip(b"=").decode("ascii")
+            return f"{signing_input}.{signature}"
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise TokenBrokerConfigError(f"GitHub App JWT signing failed: {exc}") from None
+        finally:
+            if temporary_path:
+                try:
+                    os.unlink(temporary_path)
+                except OSError:
+                    pass
 
     def get_installation_token(
         self,

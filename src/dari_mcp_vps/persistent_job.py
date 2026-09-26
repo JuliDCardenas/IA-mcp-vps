@@ -18,6 +18,10 @@ from dari_mcp_vps.job_validator import (
     _redact_secrets,
 )
 from dari_mcp_vps.promoter import BranchPromoter, GitHubPRClient, PromotionError
+from dari_mcp_vps.v2.mechanical import (
+    ConfinedMechanicalOperations,
+    MechanicalOperationResult,
+)
 from dari_mcp_vps.worktree_manager import (
     DirtyWorktreeError,
     RepositoryNotFoundError,
@@ -159,6 +163,8 @@ class PersistentJobRecord:
     exit_code: int | None = None
     execution_output_tail: str | None = None
     approved_commit_sha: str | None = None
+    repository_identity: str | None = None
+    installation_id: int | None = None
 
 
 class PersistentJobManager:
@@ -171,6 +177,7 @@ class PersistentJobManager:
         promoter: BranchPromoter | None = None,
         pr_client: GitHubPRClient | None = None,
         execution_adapter: DockerAgyJobRunner | None = None,
+        mechanical_formatters: dict[str, tuple[str, ...]] | None = None,
     ) -> None:
         self.storage_root = storage_root.expanduser().resolve()
         self.jobs_dir = (self.storage_root / "jobs").resolve()
@@ -180,6 +187,7 @@ class PersistentJobManager:
         self.promoter = promoter or BranchPromoter()
         self.pr_client = pr_client or GitHubPRClient()
         self.execution_adapter = execution_adapter or DockerAgyJobRunner()
+        self.mechanical_formatters = dict(mechanical_formatters or {})
 
     def _job_file(self, job_id: str) -> Path:
         clean_id = _sanitize_id(job_id, "job_id")
@@ -237,6 +245,8 @@ class PersistentJobManager:
         work_item_id: str | None = None,
         task_type: str = "implement",
         auto_execute: bool = False,
+        repository_identity: str | None = None,
+        installation_id: int | None = None,
     ) -> PersistentJobRecord:
         policy = self.worktree_manager.get_policy(repository)
         if policy.alias == "repositorio_bd_emision":
@@ -277,6 +287,8 @@ class PersistentJobManager:
             created_at=now,
             updated_at=now,
             audit_events=[],
+            repository_identity=repository_identity or policy.github_repo or policy.alias,
+            installation_id=installation_id,
         )
         job = self._append_audit(job, "CREATED", "create_job", f"Created job for {policy.alias}")
         self._save_job(job)
@@ -417,6 +429,52 @@ class PersistentJobManager:
         )
         self._save_job(updated_job)
         return report
+
+    def validate_only(self, job_id: str) -> ValidationReport:
+        """Run deterministic validation without invoking Agy or consuming a revision."""
+        job = self._load_job(job_id)
+        if job.status in {"CLEANED_UP", "CANCELLED", "EXPIRED"}:
+            raise JobStateError(f"Cannot validate job from terminal state {job.status}")
+        return self.validate_job(job_id)
+
+    def apply_mechanical_operation(
+        self,
+        job_id: str,
+        operation: str,
+        path: str = "",
+        formatter: str = "",
+        revalidate: bool = True,
+    ) -> tuple[MechanicalOperationResult, ValidationReport | None]:
+        """Apply one confined deterministic edit; never invokes Agy."""
+        job = self._load_job(job_id)
+        if job.status not in {"FAILED", "NOTION_REVIEW"}:
+            raise JobStateError(
+                f"Mechanical operations require FAILED or NOTION_REVIEW, found {job.status}"
+            )
+        operator = ConfinedMechanicalOperations(
+            Path(job.worktree_path),
+            formatter_commands=self.mechanical_formatters,
+        )
+        clean_operation = operation.strip().lower()
+        if clean_operation == "delete":
+            result = operator.delete_file(path)
+        elif clean_operation == "normalize_eof":
+            result = operator.normalize_eof(path)
+        elif clean_operation == "format":
+            result = operator.format(formatter)
+        else:
+            raise SecurityError(f"Unsupported mechanical operation: {operation!r}")
+
+        current = self._load_job(job_id)
+        current = self._append_audit(
+            current,
+            current.status,
+            "mechanical_operation",
+            f"{result.operation}:{result.path} changed={result.changed}",
+        )
+        self._save_job(current)
+        report = self.validate_only(job_id) if revalidate else None
+        return result, report
 
     def request_revision(
         self,
