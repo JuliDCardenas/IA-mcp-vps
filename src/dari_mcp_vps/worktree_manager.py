@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 SAFE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+BRANCH_NAME_PATTERN = re.compile(r"^feat/[A-Za-z0-9_-]{1,64}$")
 TIMEOUT_GIT_SECONDS = 30
 MAX_OUTPUT_CHARS = 1000
 
@@ -351,8 +352,13 @@ class WorktreeManager:
         _atomic_write_json(meta_path, asdict(record))
         return record
 
-    def cleanup_workspace(self, alias: str, work_item_id: str) -> WorkspaceRecord:
-        """Safely clean up a clean worktree. Rejects cleanup if the worktree contains uncommitted changes."""
+    def cleanup_workspace(
+        self,
+        alias: str,
+        work_item_id: str,
+        force_discard: bool = False,
+    ) -> WorkspaceRecord:
+        """Safely clean up a worktree. Rejects dirty worktrees unless force_discard is True."""
         policy = self.get_policy(alias)
         clean_alias = policy.alias
         clean_id = _sanitize_id(work_item_id, "work_item_id")
@@ -374,12 +380,15 @@ class WorktreeManager:
         if worktree_dir.exists():
             # Check for uncommitted changes (dirty check)
             status_output = _run_git(["status", "--porcelain=v1"], cwd=worktree_dir)
-            if status_output:
+            if status_output and not force_discard:
                 raise DirtyWorktreeError(
                     f"Refusing to clean up dirty worktree for {clean_id}: working tree has uncommitted modifications."
                 )
 
-            _run_git(["worktree", "remove", str(worktree_dir)], cwd=base_path)
+            if force_discard:
+                _run_git(["worktree", "remove", "--force", str(worktree_dir)], cwd=base_path)
+            else:
+                _run_git(["worktree", "remove", str(worktree_dir)], cwd=base_path)
             _run_git(["worktree", "prune"], cwd=base_path)
 
         updated_record = WorkspaceRecord(
@@ -396,3 +405,107 @@ class WorktreeManager:
         )
         _atomic_write_json(meta_path, asdict(updated_record))
         return updated_record
+
+    def get_branch_commit(self, alias: str, branch: str) -> str:
+        """Return the commit SHA for a branch in the base repository."""
+        policy = self.get_policy(alias)
+        if branch != "main" and branch != policy.default_base_branch and not BRANCH_NAME_PATTERN.match(branch):
+            raise SecurityError(f"Invalid branch name: {branch!r}")
+        base_path = self.ensure_base_repository(policy.alias)
+        return _run_git(["rev-parse", "--verify", f"refs/heads/{branch}"], cwd=base_path)
+
+    def commit_workspace(
+        self,
+        alias: str,
+        work_item_id: str,
+        feature_branch: str,
+        base_branch: str,
+        changes: list[Any],
+        goal: str = "",
+    ) -> str:
+        """Stage already validated changes and create exactly one local commit on feature branch.
+
+        Returns the approved commit SHA.
+        """
+        policy = self.get_policy(alias)
+        clean_alias = policy.alias
+        clean_id = _sanitize_id(work_item_id, "work_item_id")
+        clean_base = _sanitize_id(base_branch, "base_branch")
+
+        if not BRANCH_NAME_PATTERN.match(feature_branch):
+            raise SecurityError(f"Invalid feature branch: {feature_branch!r}")
+
+        wt_path = self._worktree_path(clean_alias, clean_id)
+        if not wt_path.exists():
+            raise WorktreeManagerError(f"Worktree path does not exist: {wt_path}")
+
+        # Verify checked-out branch in worktree matches feature_branch and is not main/base
+        current_branch = _run_git(["symbolic-ref", "--short", "HEAD"], cwd=wt_path)
+        if current_branch != feature_branch:
+            raise SecurityError(
+                f"Worktree branch mismatch: expected {feature_branch}, found {current_branch}"
+            )
+        if current_branch == "main" or current_branch == clean_base:
+            raise SecurityError(f"Cannot commit on protected base branch {current_branch}")
+
+        # Stage only the already validated worktree changes
+        for change in changes:
+            rel_path = change.path if hasattr(change, "path") else change["path"]
+            op = getattr(change, "operation", None) or (change.get("operation") if isinstance(change, dict) else "upsert")
+            if op == "delete":
+                _run_git(["rm", "--ignore-unmatch", "--", rel_path], cwd=wt_path)
+            else:
+                _run_git(["add", "--", rel_path], cwd=wt_path)
+
+        # Deterministic non-secret orchestrator identity
+        commit_env = os.environ.copy()
+        commit_env["GIT_AUTHOR_NAME"] = "IA MCP Orchestrator"
+        commit_env["GIT_AUTHOR_EMAIL"] = "ia-mcp-orchestrator@localhost"
+        commit_env["GIT_COMMITTER_NAME"] = "IA MCP Orchestrator"
+        commit_env["GIT_COMMITTER_EMAIL"] = "ia-mcp-orchestrator@localhost"
+        commit_env.pop("GITHUB_TOKEN", None)
+        commit_env.pop("GH_TOKEN", None)
+        commit_env.pop("GIT_SSH_COMMAND", None)
+
+        # Bounded server-generated commit message derived from work_item_id or goal
+        goal_summary = re.sub(r"\s+", " ", goal.strip())[:60] if goal else "approved changes"
+        commit_msg = f"feat({clean_id}): {goal_summary}"[:100]
+
+        check_cached = subprocess.run(
+            ["git", "-C", str(wt_path), "diff", "--cached", "--quiet"],
+            capture_output=True,
+            shell=False,
+            check=False,
+            timeout=TIMEOUT_GIT_SECONDS,
+        )
+
+        if check_cached.returncode != 0:
+            proc = subprocess.run(
+                ["git", "-C", str(wt_path), "commit", "-m", commit_msg],
+                env=commit_env,
+                capture_output=True,
+                text=True,
+                shell=False,
+                check=False,
+                timeout=TIMEOUT_GIT_SECONDS,
+            )
+            if proc.returncode != 0:
+                raise WorktreeManagerError(f"Failed to create commit: {_sanitize_output(proc.stderr or proc.stdout)}")
+        else:
+            base_path = self.ensure_base_repository(clean_alias)
+            base_commit = _run_git(["rev-parse", f"refs/heads/{clean_base}"], cwd=base_path)
+            current_head = _run_git(["rev-parse", "HEAD"], cwd=wt_path)
+            if current_head == base_commit:
+                proc = subprocess.run(
+                    ["git", "-C", str(wt_path), "commit", "--allow-empty", "-m", commit_msg],
+                    env=commit_env,
+                    capture_output=True,
+                    text=True,
+                    shell=False,
+                    check=False,
+                    timeout=TIMEOUT_GIT_SECONDS,
+                )
+                if proc.returncode != 0:
+                    raise WorktreeManagerError(f"Failed to create commit: {_sanitize_output(proc.stderr or proc.stdout)}")
+
+        return _run_git(["rev-parse", "HEAD"], cwd=wt_path)

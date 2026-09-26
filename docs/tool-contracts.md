@@ -68,10 +68,12 @@ El subsistema expone 12 herramientas integradas para trabajos de auditoría e im
 8. **`coding_job_approve_changes`**:
    - Aprueba los cambios validados desde `NOTION_REVIEW`.
    - Requiere `expected_validation_hash` y `expected_base_commit` coincidentes.
+   - Crea exactamente un commit local en la rama de característica con identidad determinista del orquestador y persiste `approved_commit_sha`.
    - Transiciona a `CHANGES_APPROVED`. No publica.
 
 9. **`coding_job_publish_branch`**:
    - Publica la rama de característica aprobada a través de `BranchPromoter`.
+   - Requiere `approved_commit_sha` y verifica coincidencia con el ref de la rama.
    - Solo permitido desde `CHANGES_APPROVED`.
    - Prohíbe publicación a `main` y prohíbe push forzado. Falla cerrado sin configuración.
 
@@ -84,4 +86,7 @@ El subsistema expone 12 herramientas integradas para trabajos de auditoría e im
 
 12. **`coding_job_cleanup`**:
     - Limpieza idempotente y segura del worktree asignado.
-    - Rechaza worktrees sucios, cambios no publicados y trabajos activos. Preserva el repositorio bare base.
+    - Parámetros: `job_id`, `confirm_discard_unpublished: bool = false`.
+    - Por defecto rechaza worktrees sucios, cambios no publicados y trabajos activos.
+    - Con `confirm_discard_unpublished=true`, permite descarte forzado exclusivamente para estados terminales `CANCELLED` o `FAILED`.
+    - Preserva el repositorio bare base y worktrees hermanos.

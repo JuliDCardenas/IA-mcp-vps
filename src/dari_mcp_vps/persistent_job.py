@@ -4,7 +4,6 @@ import json
 import os
 import re
 import signal
-import subprocess
 import uuid
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
@@ -159,6 +158,7 @@ class PersistentJobRecord:
     audit_events: list[dict[str, Any]] = field(default_factory=list)
     exit_code: int | None = None
     execution_output_tail: str | None = None
+    approved_commit_sha: str | None = None
 
 
 class PersistentJobManager:
@@ -493,11 +493,25 @@ class PersistentJobManager:
         if recheck.report_hash != actual_hash:
             raise EvidenceMismatchError("Worktree state has changed since validation report was generated")
 
+        # Stage validated changes and create local commit via WorktreeManager
+        approved_commit_sha = self.worktree_manager.commit_workspace(
+            alias=job.repository,
+            work_item_id=job.work_item_id,
+            feature_branch=job.feature_branch,
+            base_branch=job.base_branch,
+            changes=recheck.changes,
+            goal=job.goal,
+        )
+
+        d = asdict(job)
+        d["approved_commit_sha"] = approved_commit_sha
+        job = PersistentJobRecord(**d)
+
         job = self._append_audit(
             job,
             "CHANGES_APPROVED",
             "approve_changes",
-            f"Approved with hash {expected_validation_hash[:8]}",
+            f"Approved with hash {expected_validation_hash[:8]} (commit={approved_commit_sha[:8]})",
         )
         self._save_job(job)
         return job
@@ -507,10 +521,22 @@ class PersistentJobManager:
         if job.status != "CHANGES_APPROVED":
             raise JobStateError(f"Cannot publish branch from state {job.status}; must be CHANGES_APPROVED")
 
+        if not job.approved_commit_sha:
+            raise JobStateError(f"Cannot publish branch for job {job_id}: missing approved_commit_sha")
+
         base_path = self.worktree_manager.ensure_base_repository(job.repository)
+
+        current_sha = self.worktree_manager.get_branch_commit(job.repository, job.feature_branch)
+        if current_sha != job.approved_commit_sha:
+            raise EvidenceMismatchError(
+                f"Feature branch ref refs/heads/{job.feature_branch} ({current_sha}) "
+                f"does not match approved_commit_sha ({job.approved_commit_sha})"
+            )
+
         publish_res = self.promoter.publish_branch(
             base_repo_path=base_path,
             feature_branch=job.feature_branch,
+            expected_commit_sha=job.approved_commit_sha,
         )
 
         d = asdict(job)
@@ -520,7 +546,7 @@ class PersistentJobManager:
             job,
             "BRANCH_PUBLISHED",
             "publish_branch",
-            f"Published to {publish_res.publish_remote}",
+            f"Published to {publish_res.publish_remote} (commit={job.approved_commit_sha[:8]})",
         )
         self._save_job(job)
         return job
@@ -581,12 +607,39 @@ class PersistentJobManager:
         self._save_job(job)
         return job
 
-    def cleanup_job(self, job_id: str) -> PersistentJobRecord:
+    def cleanup_job(
+        self,
+        job_id: str,
+        confirm_discard_unpublished: bool = False,
+    ) -> PersistentJobRecord:
         job = self._load_job(job_id)
         if job.status == "CLEANED_UP":
             return job
 
-        if job.status in ACTIVE_STATES:
+        if confirm_discard_unpublished:
+            # Explicit discard is allowed ONLY for terminal CANCELLED or FAILED jobs
+            # Never allow discard cleanup from CREATED, RUNNING, VALIDATING, NOTION_REVIEW, CHANGES_APPROVED, BRANCH_PUBLISHED, or PR_CREATED.
+            if job.status not in {"CANCELLED", "FAILED"}:
+                raise JobStateError(
+                    f"Explicit discard cleanup is forbidden for job in state {job.status}; "
+                    "only terminal CANCELLED or FAILED jobs can be discarded."
+                )
+            self.worktree_manager.cleanup_workspace(
+                alias=job.repository,
+                work_item_id=job.work_item_id,
+                force_discard=True,
+            )
+            job = self._append_audit(
+                job,
+                "CLEANED_UP",
+                "cleanup_job",
+                "Explicit discard confirmation accepted; dirty unpublished worktree safely removed",
+            )
+            self._save_job(job)
+            return job
+
+        # Normal cleanup (confirm_discard_unpublished is False)
+        if job.status in ACTIVE_STATES or job.status == "CREATED":
             raise JobStateError(f"Cannot clean up active job in state {job.status}")
 
         if job.status in {"NOTION_REVIEW", "CHANGES_APPROVED"}:
@@ -598,6 +651,7 @@ class PersistentJobManager:
         self.worktree_manager.cleanup_workspace(
             alias=job.repository,
             work_item_id=job.work_item_id,
+            force_discard=False,
         )
 
         job = self._append_audit(

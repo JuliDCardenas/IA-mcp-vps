@@ -362,6 +362,7 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
                 "error": job.error,
                 "exit_code": job.exit_code,
                 "execution_output_tail": job.execution_output_tail,
+                "approved_commit_sha": job.approved_commit_sha,
             }
 
         status = status_payload(job_id)
@@ -482,9 +483,12 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
         return {"job_id": job_id, "status": "CANCELLED", "reason": reason}
 
     @mcp.tool()
-    def coding_job_cleanup(job_id: str) -> dict[str, Any]:
+    def coding_job_cleanup(job_id: str, confirm_discard_unpublished: bool = False) -> dict[str, Any]:
         """Clean up the assigned persistent worktree safely, preserving base repository."""
         if is_persistent_job(job_id):
-            job = _get_mgr().cleanup_job(job_id=job_id)
+            job = _get_mgr().cleanup_job(
+                job_id=job_id,
+                confirm_discard_unpublished=confirm_discard_unpublished,
+            )
             return asdict(job)
         return {"job_id": job_id, "status": "CLEANED_UP", "message": "Legacy job cleanup completed"}
