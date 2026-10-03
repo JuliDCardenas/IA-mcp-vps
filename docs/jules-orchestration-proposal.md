@@ -9,7 +9,7 @@ A diferencia del flujo con contenedores locales aislados (`Agy`), este sistema n
 ### Principios
 1. **Asincronía total:** Notion IA delega y recibe confirmación inmediata. No se bloquea esperando a que el código sea escrito.
 2. **Registro local autónomo (SQLite):** El MCP mantiene su propia pista de auditoría sin depender de contenedores externos.
-3. **Notificaciones Híbridas:** El MCP notifica el inicio vía Webhooks (Push), mientras que n8n se encarga de un *polling ligero* para mantener sincronizados los estados intermedios y finales sin saturar al MCP.
+3. **Notificaciones Híbridas (Push a n8n):** El servidor MCP notifica de inmediato vía Webhooks a n8n. Para evitar que n8n deba hacer polling (lo cual es un anti-patrón en herramientas de workflow), **el propio servidor MCP se encargará de realizar un polling ligero en segundo plano** hacia la API de Jules para mantener el estado sincronizado de forma atómica.
 4. **Desacoplamiento:** Herramientas separadas e independientes del flujo heredado de Agy.
 
 ---
@@ -41,8 +41,8 @@ Para mantener trazabilidad sin la complejidad de bases de datos externas en Dock
 - `created_at` (timestamp)
 - `updated_at` (timestamp)
 
-### 2.3 Notificaciones y Sincronización de Estado (n8n Polling)
-Para garantizar consistencia y manejar escenarios de falla, pausas o finalización, se utilizará una estrategia híbrida liderada por **n8n**:
+### 2.3 Notificaciones y Sincronización de Estado (Background Polling en MCP)
+Para garantizar consistencia y manejar escenarios de falla, pausas o finalización sin contaminar el orquestador n8n con bucles infinitos, se utilizará una estrategia de polling ligero residente en el servidor MCP:
 
 **Fase 1: Delegación (Push MCP -> n8n)**
 En el momento en que la herramienta MCP asigna la tarea con éxito, ejecuta un `POST` al webhook configurado en n8n:
@@ -54,14 +54,14 @@ En el momento en que la herramienta MCP asigna la tarea con éxito, ejecuta un `
   "repo_name": "IA-mcp-vps"
 }
 ```
-*n8n recibe esto e informa al usuario por Telegram.*
+*n8n actúa como un receptor pasivo, recibe el evento e informa al usuario por Telegram.*
 
-**Fase 2: Polling Inteligente (n8n -> API de Jules)**
-Dado que no existe un webhook push saliente oficial desde la API de Jules, **n8n asumirá el rol de monitor**.
-- n8n programará un polling (ej. cada 60s) haciendo un GET a la API de Jules *solo* para las sesiones activas, buscando cambios de estado (`COMPLETED`, `WAITING_FOR_INPUT`, `FAILED`).
-- Cuando n8n detecta un cambio, hace dos acciones:
-  1. Envía el aviso por Telegram (ej. *"Jules pausó"* o *"Jules falló y no habrá PR"*).
-  2. Hace una petición local al MCP (o ejecuta un query directo si tiene acceso seguro) para actualizar el estado en `jules_jobs.db`, manteniendo la base de datos sincronizada con la realidad.
+**Fase 2: Polling Inteligente (MCP -> API de Jules)**
+Dado que no existe un webhook push saliente oficial desde la API de Jules, **el servidor MCP asumirá el rol de monitor** mediante una tarea asíncrona en segundo plano:
+- El MCP consultará la API de Jules (ej. cada 60s) *exclusivamente* para aquellos trabajos que estén en estado activo (`EN_PROGRESO` o `PENDIENTE`) en su base de datos SQLite.
+- Cuando el MCP detecta un cambio de estado en la API (ej. a `WAITING_FOR_INPUT`, `COMPLETED` o `FAILED`), realiza dos acciones:
+  1. Actualiza inmediatamente el registro en la base de datos local `jules_jobs.db`, manteniendo su integridad como fuente única de la verdad.
+  2. Dispara un nuevo webhook push hacia n8n enviando el evento del cambio de estado, permitiendo que n8n simplemente entregue la notificación al usuario.
 
 ---
 
@@ -84,8 +84,8 @@ Dado que no existe un webhook push saliente oficial desde la API de Jules, **n8n
 
 Es posible que Jules (el agente) necesite aclaraciones técnicas o requiera que el usuario apruebe un plan antes de generar código destructivo o realizar un PR. El sistema soporta este flujo de "ping-pong" asíncrono de la siguiente manera:
 
-1. **Detección de la pausa:** Mediante su rutina de polling, n8n consulta la API de Jules y descubre que la sesión ha pasado a estado de espera de input.
-2. **Notificación de Pausa:** n8n alerta al usuario por Telegram de que se requiere su atención e instruye al servidor MCP para que actualice la base de datos a `ESPERANDO_FEEDBACK`.
+1. **Detección de la pausa:** Mediante su rutina de polling en segundo plano, el MCP descubre que la sesión en la API ha pasado a estado de espera de input. Actualiza la SQLite a `ESPERANDO_FEEDBACK`.
+2. **Notificación de Pausa:** El MCP dispara un webhook a n8n enviando el contexto. n8n simplemente pasa el mensaje alertando al usuario por Telegram de que se requiere su atención.
 3. **Respuesta de Notion IA:** Notion IA lee el contexto solicitado, analiza el proyecto y, basándose en el conocimiento del usuario, utiliza la herramienta `jules_reply_to_task` pasándole la instrucción o aprobación (ej. *"Aprobado, procede con el plan 2"*).
 4. **Reanudación:** El MCP hace un llamado POST a la API de Jules entregando la respuesta. Jules reanuda la ejecución en la nube.
 
@@ -104,6 +104,6 @@ No se requerirá despliegue de nuevos contenedores. La librería nativa de Pytho
 ---
 
 ## 5. Decisiones Aprobadas
-- **Monitoreo Externo Asignado a n8n:** Se aprueba eliminar las complejas colas de mensajería (outbox) locales. El orquestador delegará la responsabilidad de consultar el progreso del agente (polling de estado, pausas y PRs generados) directamente a los flujos de n8n, liberando al MCP de la carga de monitoreo continuo.
+- **Monitoreo Liderado por MCP (No Outbox local complejo):** Se aprueba la eliminación de sistemas pesados de colas (outbox local). El propio servidor MCP se encargará del polling ligero de sesiones activas, garantizando que su SQLite sea la única fuente de la verdad, mientras que n8n permanecerá como un sistema pasivo de recepción de webhooks (push).
 - **Independencia de Agy:** Las herramientas y persistencia de Jules vivirán en paralelo sin afectar la lógica o seguridad restrictiva de Agy.
 - **Aprobación final manual (PR):** El sistema MCP NO realizará *merges* ni despliegues a producción; Jules entregará ramas/PRs, respetando la frontera de seguridad del proyecto.
