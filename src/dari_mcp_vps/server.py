@@ -15,9 +15,10 @@ from dari_mcp_vps.tools.http_tools import register_http_tools
 from dari_mcp_vps.tools.coding_jobs import register_coding_job_tools
 from dari_mcp_vps.tools.private_coding_job import register_private_coding_job_tool
 from dari_mcp_vps.tools.jules_tools import register_jules_tools
+from dari_mcp_vps.tools.jules_monitor import monitor_lifespan_factory
 
 CONFIG = load_config()
-mcp = FastMCP(CONFIG.raw.get("server", {}).get("name", "IA MCP VPS"))
+mcp = FastMCP(CONFIG.raw.get("server", {}).get("name", "IA MCP VPS"), lifespan=monitor_lifespan_factory(CONFIG))
 
 register_system_tools(mcp, CONFIG)
 register_filesystem_tools(mcp, CONFIG)

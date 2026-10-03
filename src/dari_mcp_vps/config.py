@@ -25,6 +25,14 @@ class AppConfig:
         default_db = '/var/lib/coding-jobs/jules_jobs.db'
         return os.getenv('JULES_DB_PATH', self.raw.get('jules', {}).get('db_path', default_db))
 
+    @property
+    def n8n_webhook_url(self):
+        return os.getenv('N8N_WEBHOOK_URL', self.raw.get('jules', {}).get('n8n_webhook_url', ''))
+
+    @property
+    def n8n_webhook_key(self):
+        return os.getenv('N8N_WEBHOOK_KEY', self.raw.get('jules', {}).get('n8n_webhook_key', ''))
+
 def load_config(path=None):
     p = Path(path or os.getenv('IA_MCP_VPS_CONFIG', 'config.yaml')).expanduser().resolve()
     if not p.exists():

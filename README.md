@@ -52,12 +52,16 @@ El orquestador incluye soporte parcial asíncrono para delegar tareas al agente 
 - `JULES_API_KEY`: Tu clave de API para la plataforma Jules.
 - `JULES_API_URL`: Opcional, por defecto `https://jules.googleapis.com/v1alpha`.
 - `JULES_DB_PATH`: Opcional, por defecto `/var/lib/coding-jobs/jules_jobs.db`.
+- `N8N_WEBHOOK_URL`: URL del webhook HTTP creado en n8n para recibir eventos (ej: `https://n8n.julidcardenas.site/webhook/jules-notifications`).
+- `N8N_WEBHOOK_KEY`: Clave secreta (X-Jules-Webhook-Key) para autenticar las peticiones contra n8n.
 
 **Configuración segura en el VPS:**
 1. Crear o editar el archivo `.env` en la raíz del proyecto (`~/IA-mcp-vps/.env`).
-2. Añadir la clave de forma segura sin comillas:
+2. Añadir las claves de forma segura sin comillas:
    ```env
    JULES_API_KEY=tu_clave_real_aqui
+   N8N_WEBHOOK_URL=https://n8n.julidcardenas.site/webhook/jules-notifications
+   N8N_WEBHOOK_KEY=tu_secreto_n8n_aqui
    ```
 3. Reiniciar el contenedor: `docker compose up -d ia-mcp-vps`
 

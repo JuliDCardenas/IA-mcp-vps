@@ -24,12 +24,65 @@ def init_db(db_path: str) -> None:
             )
         """)
 
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS jules_events (
+                id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TIMESTAMP NOT NULL
+            )
+        """)
+
         # Safely add the column if the table already existed without it
         try:
             cursor.execute("ALTER TABLE jules_jobs ADD COLUMN remote_state TEXT")
         except sqlite3.OperationalError:
             pass # Column likely already exists
 
+        conn.commit()
+
+def get_active_jobs(db_path: str) -> list[Dict[str, Any]]:
+    """Retrieve all jobs that need monitoring."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM jules_jobs WHERE status IN ('EN_PROGRESO', 'PENDIENTE') AND jules_agent_job_id IS NOT NULL")
+        return [dict(row) for row in cursor.fetchall()]
+
+def record_event(db_path: str, job_id: str, event_type: str, payload_dict: Dict[str, Any]) -> None:
+    """Record a webhook event for a job, injecting event_id and timestamp into the payload."""
+    event_id = str(uuid.uuid4())
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    payload_dict["event_id"] = event_id
+    payload_dict["timestamp"] = now
+
+    import json
+    payload_str = json.dumps(payload_dict)
+
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO jules_events (id, job_id, event_type, payload, status, created_at)
+            VALUES (?, ?, ?, ?, 'PENDING', ?)
+        """, (event_id, job_id, event_type, payload_str, now))
+        conn.commit()
+
+def get_pending_events(db_path: str) -> list[Dict[str, Any]]:
+    """Retrieve all pending events to dispatch."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM jules_events WHERE status = 'PENDING' ORDER BY created_at ASC")
+        return [dict(row) for row in cursor.fetchall()]
+
+def mark_event_sent(db_path: str, event_id: str) -> None:
+    """Mark an event as successfully sent."""
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE jules_events SET status = 'SENT' WHERE id = ?", (event_id,))
         conn.commit()
 
 def create_job(db_path: str, repo_name: str, task_description: str) -> str:
