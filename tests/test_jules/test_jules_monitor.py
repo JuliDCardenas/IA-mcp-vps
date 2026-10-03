@@ -142,3 +142,94 @@ async def test_monitor_completed_with_pr_and_webhook_retry(mock_sleep, mock_conf
 
         cursor.execute("SELECT status FROM jules_events WHERE job_id = ?", (job_id,))
         assert cursor.fetchone()[0] == "SENT"
+
+@patch("asyncio.sleep", new_callable=AsyncMock)
+@pytest.mark.asyncio
+async def test_monitor_resume_after_feedback_and_restart(mock_sleep, mock_config):
+    job_id = create_job(mock_config.jules_db_path, "my-repo", "Task 1")
+    update_job_remote_id(mock_config.jules_db_path, job_id, "sessions/123")
+
+    # Directly set to ESPERANDO_FEEDBACK simulating a restart state
+    with sqlite3.connect(mock_config.jules_db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE jules_jobs
+            SET status = 'ESPERANDO_FEEDBACK', remote_state = 'AWAITING_PLAN_APPROVAL'
+            WHERE id = ?
+        """, (job_id,))
+        conn.commit()
+
+    jules_resp_in_progress = MagicMock()
+    jules_resp_in_progress.read.return_value = json.dumps({"state": "IN_PROGRESS"}).encode("utf-8")
+    jules_resp_in_progress.status = 200
+
+    jules_resp_completed = MagicMock()
+    jules_resp_completed.read.return_value = json.dumps({
+        "state": "COMPLETED",
+        "outputs": [{"pullRequest": {"url": "https://github.com/my-repo/pull/1", "title": "My PR"}}]
+    }).encode("utf-8")
+    jules_resp_completed.status = 200
+
+    webhook_resp = MagicMock()
+    webhook_resp.status = 200
+
+    call_count = 0
+    def side_effect_func(req, *args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if hasattr(req, "full_url") and "n8n" in req.full_url:
+            return MagicMock(__enter__=lambda _: webhook_resp, __exit__=lambda *a: None)
+        else:
+            # First polling returns IN_PROGRESS, second returns COMPLETED
+            # Note: with webhook deliveries, there will be more calls.
+            # We just track how many times Jules API is called to sequence it.
+            if call_count <= 2:
+                # E.g. Jules API poll 1 -> IN_PROGRESS
+                # Actually, call_count tracks ALL urllib calls.
+                return MagicMock(__enter__=lambda _: jules_resp_in_progress, __exit__=lambda *a: None)
+            else:
+                return MagicMock(__enter__=lambda _: jules_resp_completed, __exit__=lambda *a: None)
+
+    jules_call_count = 0
+    def jules_side_effect(req, *args, **kwargs):
+        nonlocal jules_call_count
+        if hasattr(req, "full_url") and "n8n" in req.full_url:
+            return MagicMock(__enter__=lambda _: webhook_resp, __exit__=lambda *a: None)
+        else:
+            jules_call_count += 1
+            if jules_call_count == 1:
+                return MagicMock(__enter__=lambda _: jules_resp_in_progress, __exit__=lambda *a: None)
+            else:
+                return MagicMock(__enter__=lambda _: jules_resp_completed, __exit__=lambda *a: None)
+
+    with patch("urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.side_effect = jules_side_effect
+
+        # Let it run enough times to transition to IN_PROGRESS, send webhook, transition to COMPLETED, send webhook.
+        mock_sleep.side_effect = [None, None, None, None, Exception("Stop loop")]
+        try:
+            await background_monitor(mock_config)
+        except Exception as e:
+            if str(e) != "Stop loop":
+                raise
+
+    with sqlite3.connect(mock_config.jules_db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        # Final status should be COMPLETED
+        cursor.execute("SELECT status, remote_state FROM jules_jobs WHERE id = ?", (job_id,))
+        job = dict(cursor.fetchone())
+        assert job["status"] == "COMPLETED"
+        assert job["remote_state"] == "COMPLETED"
+
+        # We should have 2 events: one for IN_PROGRESS and one for COMPLETED
+        cursor.execute("SELECT status, payload FROM jules_events WHERE job_id = ? ORDER BY created_at ASC", (job_id,))
+        events = cursor.fetchall()
+        assert len(events) == 2
+
+        event_1 = json.loads(dict(events[0])["payload"])
+        assert event_1["remote_state"] == "IN_PROGRESS"
+
+        event_2 = json.loads(dict(events[1])["payload"])
+        assert event_2["remote_state"] == "COMPLETED"

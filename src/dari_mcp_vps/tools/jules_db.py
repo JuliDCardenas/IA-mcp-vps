@@ -48,7 +48,7 @@ def get_active_jobs(db_path: str) -> list[Dict[str, Any]]:
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM jules_jobs WHERE status IN ('EN_PROGRESO', 'PENDIENTE') AND jules_agent_job_id IS NOT NULL")
+        cursor.execute("SELECT * FROM jules_jobs WHERE status IN ('EN_PROGRESO', 'PENDIENTE', 'ESPERANDO_FEEDBACK') AND jules_agent_job_id IS NOT NULL")
         return [dict(row) for row in cursor.fetchall()]
 
 def record_event(db_path: str, job_id: str, event_type: str, payload_dict: Dict[str, Any]) -> None:
