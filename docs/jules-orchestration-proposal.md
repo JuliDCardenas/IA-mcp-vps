@@ -25,6 +25,9 @@ Se crearán nuevas herramientas exclusivas bajo un módulo dedicado (`src/dari_m
 - `jules_check_task_status`:
   - **Parámetros:** `task_id` (string).
   - **Acción:** Consulta la BD SQLite local y devuelve el estado actual y el historial del trabajo. (Nota: el estado final será validado externamente).
+- `jules_reply_to_task`:
+  - **Parámetros:** `task_id` (string), `feedback_or_approval` (string).
+  - **Acción:** Envía una respuesta (POST) a la sesión pausada de Jules a través de su API para reanudar el trabajo tras una solicitud de contexto o aprobación, y actualiza el estado en la BD local.
 
 ### 2.2 Base de Datos Local (SQLite)
 Para mantener trazabilidad sin la complejidad de bases de datos externas en Docker, el MCP implementará una base de datos SQLite en el volumen persistente existente (`/var/lib/coding-jobs/jules_jobs.db`).
@@ -34,12 +37,12 @@ Para mantener trazabilidad sin la complejidad de bases de datos externas en Dock
 - `repo_name` (varchar)
 - `task_description` (text)
 - `jules_agent_job_id` (varchar, ID devuelto por la API del agente)
-- `status` (PENDIENTE, EN_PROGRESO, PR_CREADO, FALLIDO)
+- `status` (PENDIENTE, EN_PROGRESO, ESPERANDO_FEEDBACK, PR_CREADO, FALLIDO)
 - `created_at` (timestamp)
 - `updated_at` (timestamp)
 
 ### 2.3 Notificaciones (Webhook + n8n)
-La arquitectura de notificaciones se divide en dos fases push (sin polling):
+La arquitectura de notificaciones se divide en fases push (sin polling):
 
 **Fase 1: Delegación (MCP -> n8n)**
 En el momento exacto en que la herramienta MCP asigna la tarea con éxito, ejecuta un `POST` al webhook configurado en n8n enviando:
@@ -72,6 +75,17 @@ n8n se configurará para escuchar eventos de *New Pull Request* del repositorio 
 4. **Notificación de Inicio:** n8n envía el mensaje inicial por Telegram al usuario.
 5. **Trabajo Autónomo:** Jules (en la nube) clona el repositorio, aplica los cambios, corre pruebas y crea el Pull Request.
 6. **Notificación de Cierre:** El PR activa a n8n, el cual envía el mensaje de Telegram indicando que el trabajo está listo para revisión manual y despliegue.
+
+---
+
+## 3.1 Flujo de Ejecución Intermedio (Feedback y Aprobación)
+
+Es posible que Jules (el agente) necesite aclaraciones técnicas o requiera que el usuario apruebe un plan antes de generar código destructivo o realizar un PR. El sistema soporta este flujo de "ping-pong" asíncrono de la siguiente manera:
+
+1. **Jules solicita feedback:** Desde su plataforma, Jules pausa su ejecución y lanza un Webhook hacia n8n indicando: `"ID_Tarea: 1234. Necesito aprobación para el siguiente plan..."`.
+2. **Notificación de Pausa:** n8n recibe este webhook, alerta al usuario por Telegram de que se requiere su atención (y opcionalmente, notifica al servidor MCP para que actualice la base de datos a `ESPERANDO_FEEDBACK`).
+3. **Respuesta de Notion IA:** Notion IA lee el contexto solicitado, analiza el proyecto y, basándose en el conocimiento del usuario, utiliza la herramienta `jules_reply_to_task` pasándole la instrucción o aprobación (ej. *"Aprobado, procede con el plan 2"*).
+4. **Reanudación:** El MCP hace un llamado POST a la API de Jules entregando la respuesta. Jules reanuda la ejecución en la nube.
 
 ---
 
