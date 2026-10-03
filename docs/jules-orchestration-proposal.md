@@ -9,7 +9,7 @@ A diferencia del flujo con contenedores locales aislados (`Agy`), este sistema n
 ### Principios
 1. **Asincronía total:** Notion IA delega y recibe confirmación inmediata. No se bloquea esperando a que el código sea escrito.
 2. **Registro local autónomo (SQLite):** El MCP mantiene su propia pista de auditoría sin depender de contenedores externos.
-3. **Notificaciones Push:** Cero *polling*. El MCP notifica directamente vía Webhooks, y el ciclo se cierra mediante eventos de GitHub.
+3. **Notificaciones Híbridas (Push a n8n):** El servidor MCP notifica de inmediato vía Webhooks a n8n. Para evitar que n8n deba hacer polling (lo cual es un anti-patrón en herramientas de workflow), **el propio servidor MCP se encargará de realizar un polling ligero en segundo plano** hacia la API de Jules para mantener el estado sincronizado de forma atómica.
 4. **Desacoplamiento:** Herramientas separadas e independientes del flujo heredado de Agy.
 
 ---
@@ -25,6 +25,9 @@ Se crearán nuevas herramientas exclusivas bajo un módulo dedicado (`src/dari_m
 - `jules_check_task_status`:
   - **Parámetros:** `task_id` (string).
   - **Acción:** Consulta la BD SQLite local y devuelve el estado actual y el historial del trabajo. (Nota: el estado final será validado externamente).
+- `jules_reply_to_task`:
+  - **Parámetros:** `task_id` (string), `feedback_or_approval` (string).
+  - **Acción:** Envía una respuesta (POST) a la sesión pausada de Jules a través de su API para reanudar el trabajo tras una solicitud de contexto o aprobación, y actualiza el estado en la BD local.
 
 ### 2.2 Base de Datos Local (SQLite)
 Para mantener trazabilidad sin la complejidad de bases de datos externas en Docker, el MCP implementará una base de datos SQLite en el volumen persistente existente (`/var/lib/coding-jobs/jules_jobs.db`).
@@ -34,29 +37,32 @@ Para mantener trazabilidad sin la complejidad de bases de datos externas en Dock
 - `repo_name` (varchar)
 - `task_description` (text)
 - `jules_agent_job_id` (varchar, ID devuelto por la API del agente)
-- `status` (PENDIENTE, EN_PROGRESO, PR_CREADO, FALLIDO)
+- `status` (PENDIENTE, EN_PROGRESO, ESPERANDO_FEEDBACK, PR_CREADO, FALLIDO)
 - `created_at` (timestamp)
 - `updated_at` (timestamp)
 
-### 2.3 Notificaciones (Webhook + n8n)
-La arquitectura de notificaciones se divide en dos fases push (sin polling):
+### 2.3 Notificaciones y Sincronización de Estado (Background Polling en MCP)
+Para garantizar consistencia y manejar escenarios de falla, pausas o finalización sin contaminar el orquestador n8n con bucles infinitos, se utilizará una estrategia de polling ligero residente en el servidor MCP:
 
-**Fase 1: Delegación (MCP -> n8n)**
-En el momento exacto en que la herramienta MCP asigna la tarea con éxito, ejecuta un `POST` al webhook configurado en n8n enviando:
+**Fase 1: Delegación (Push MCP -> n8n)**
+En el momento en que la herramienta MCP asigna la tarea con éxito, ejecuta un `POST` al webhook configurado en n8n:
 ```json
 {
   "event": "TASK_DELEGATED",
   "task_id": "uuid-1234",
-  "repo_name": "IA-mcp-vps",
-  "description": "Corregir vulnerabilidad en auth..."
+  "jules_api_id": "agent-session-888",
+  "repo_name": "IA-mcp-vps"
 }
 ```
-*n8n recibe esto y alerta por Telegram al usuario: "Jules comenzó a trabajar en IA-mcp-vps".*
+*n8n actúa como un receptor pasivo, recibe el evento e informa al usuario por Telegram.*
 
-**Fase 2: Finalización (GitHub -> n8n)**
-Dado que Jules entregará su trabajo directamente como un Pull Request (PR) en el repositorio objetivo, el cierre del ciclo no es responsabilidad del MCP.
-n8n se configurará para escuchar eventos de *New Pull Request* del repositorio a través de la API de GitHub (o webhook nativo de GitHub).
-*n8n recibe el evento del PR y alerta por Telegram al usuario: "Jules ha terminado y dejó un PR listo para revisar".*
+**Fase 2: Polling Inteligente y Resiliente (MCP -> API de Jules)**
+Dado que no existe un webhook push saliente oficial desde la API de Jules, **el servidor MCP asumirá el rol de monitor** mediante una tarea asíncrona en segundo plano:
+- Al arrancar (incluso tras un reinicio del MCP), el monitor recuperará inmediatamente de la base de datos SQLite todas las sesiones que requieran seguimiento (ej. en cola, ejecutándose, o esperando intervención).
+- El MCP consultará la API de Jules (ej. cada 60s) *exclusivamente* para estos trabajos activos.
+- Cuando el MCP detecta un cambio de estado en la API (ej. a `AWAITING_USER_FEEDBACK`, `AWAITING_PLAN_APPROVAL`, `COMPLETED` o `FAILED`), realiza dos acciones atómicas:
+  1. Persiste el nuevo estado y el evento en la base de datos local `jules_jobs.db` para garantizar la fuente de la verdad local, agrupando internamente si es necesario pero conservando el motivo exacto de la pausa.
+  2. Tras guardar, dispara un nuevo webhook push hacia n8n enviando el evento del cambio de estado, permitiendo que n8n simplemente entregue la notificación final a Telegram.
 
 ---
 
@@ -75,12 +81,23 @@ n8n se configurará para escuchar eventos de *New Pull Request* del repositorio 
 
 ---
 
+## 3.1 Flujo de Ejecución Intermedio (Feedback y Aprobación)
+
+Es posible que Jules (el agente) necesite aclaraciones técnicas o requiera que el usuario apruebe un plan antes de generar código destructivo o realizar un PR. El sistema soporta este flujo de "ping-pong" asíncrono de la siguiente manera:
+
+1. **Detección de la pausa:** Mediante su rutina de polling en segundo plano, el MCP descubre que la sesión en la API ha pasado a `AWAITING_USER_FEEDBACK` o `AWAITING_PLAN_APPROVAL`. Persiste el estado exacto en la SQLite y prepara el aviso.
+2. **Notificación de Pausa:** El MCP dispara un webhook a n8n enviando el contexto. n8n simplemente pasa el mensaje alertando al usuario por Telegram de que se requiere su atención.
+3. **Respuesta de Notion IA:** Notion IA lee el contexto solicitado, analiza el proyecto y, basándose en el conocimiento del usuario, utiliza la herramienta `jules_reply_to_task` pasándole la instrucción o aprobación (ej. *"Aprobado, procede con el plan 2"*).
+4. **Reanudación:** El MCP hace un llamado POST a la API de Jules entregando la respuesta. Jules reanuda la ejecución en la nube.
+
+---
+
 ## 4. Requisitos de Infraestructura y Configuración
 
 Se añadirán las siguientes claves de configuración al sistema, administradas mediante variables de entorno seguras (no versionadas):
 
 - `JULES_API_KEY`: Autenticación para la plataforma del agente.
-- `JULES_API_URL`: Endpoint de la plataforma de Jules (ej. `https://api.agency.ai/v1/agents/...`).
+- `JULES_API_URL`: Endpoint oficial de la plataforma (ej. `https://jules.googleapis.com/v1alpha/...`).
 - `N8N_WEBHOOK_URL`: Endpoint del webhook HTTP creado en el flujo de n8n para recibir alertas de delegación.
 
 No se requerirá despliegue de nuevos contenedores. La librería nativa de Python `sqlite3` será suficiente para gestionar la persistencia local en el volumen del MCP.
@@ -88,6 +105,6 @@ No se requerirá despliegue de nuevos contenedores. La librería nativa de Pytho
 ---
 
 ## 5. Decisiones Aprobadas
-- **Descarte del modelo Outbox/Polling:** Se aprueba eliminar las complejas colas de mensajería (outbox local) en favor de llamadas directas y eventos de GitHub, salvaguardando los recursos del VPS y de la cuota de la IA.
+- **Monitoreo Liderado por MCP (No Outbox local complejo):** Se aprueba la eliminación de sistemas pesados de colas (outbox local). El propio servidor MCP se encargará del polling ligero de sesiones activas, garantizando que su SQLite sea la única fuente de la verdad, mientras que n8n permanecerá como un sistema pasivo de recepción de webhooks (push).
 - **Independencia de Agy:** Las herramientas y persistencia de Jules vivirán en paralelo sin afectar la lógica o seguridad restrictiva de Agy.
 - **Aprobación final manual (PR):** El sistema MCP NO realizará *merges* ni despliegues a producción; Jules entregará ramas/PRs, respetando la frontera de seguridad del proyecto.
