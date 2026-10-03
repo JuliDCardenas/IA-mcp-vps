@@ -9,7 +9,7 @@ A diferencia del flujo con contenedores locales aislados (`Agy`), este sistema n
 ### Principios
 1. **Asincronía total:** Notion IA delega y recibe confirmación inmediata. No se bloquea esperando a que el código sea escrito.
 2. **Registro local autónomo (SQLite):** El MCP mantiene su propia pista de auditoría sin depender de contenedores externos.
-3. **Notificaciones Push:** Cero *polling*. El MCP notifica directamente vía Webhooks, y el ciclo se cierra mediante eventos de GitHub.
+3. **Notificaciones Híbridas:** El MCP notifica el inicio vía Webhooks (Push), mientras que n8n se encarga de un *polling ligero* para mantener sincronizados los estados intermedios y finales sin saturar al MCP.
 4. **Desacoplamiento:** Herramientas separadas e independientes del flujo heredado de Agy.
 
 ---
@@ -41,25 +41,27 @@ Para mantener trazabilidad sin la complejidad de bases de datos externas en Dock
 - `created_at` (timestamp)
 - `updated_at` (timestamp)
 
-### 2.3 Notificaciones (Webhook + n8n)
-La arquitectura de notificaciones se divide en fases push (sin polling):
+### 2.3 Notificaciones y Sincronización de Estado (n8n Polling)
+Para garantizar consistencia y manejar escenarios de falla, pausas o finalización, se utilizará una estrategia híbrida liderada por **n8n**:
 
-**Fase 1: Delegación (MCP -> n8n)**
-En el momento exacto en que la herramienta MCP asigna la tarea con éxito, ejecuta un `POST` al webhook configurado en n8n enviando:
+**Fase 1: Delegación (Push MCP -> n8n)**
+En el momento en que la herramienta MCP asigna la tarea con éxito, ejecuta un `POST` al webhook configurado en n8n:
 ```json
 {
   "event": "TASK_DELEGATED",
   "task_id": "uuid-1234",
-  "repo_name": "IA-mcp-vps",
-  "description": "Corregir vulnerabilidad en auth..."
+  "jules_api_id": "agent-session-888",
+  "repo_name": "IA-mcp-vps"
 }
 ```
-*n8n recibe esto y alerta por Telegram al usuario: "Jules comenzó a trabajar en IA-mcp-vps".*
+*n8n recibe esto e informa al usuario por Telegram.*
 
-**Fase 2: Finalización (GitHub -> n8n)**
-Dado que Jules entregará su trabajo directamente como un Pull Request (PR) en el repositorio objetivo, el cierre del ciclo no es responsabilidad del MCP.
-n8n se configurará para escuchar eventos de *New Pull Request* del repositorio a través de la API de GitHub (o webhook nativo de GitHub).
-*n8n recibe el evento del PR y alerta por Telegram al usuario: "Jules ha terminado y dejó un PR listo para revisar".*
+**Fase 2: Polling Inteligente (n8n -> API de Jules)**
+Dado que no existe un webhook push saliente oficial desde la API de Jules, **n8n asumirá el rol de monitor**.
+- n8n programará un polling (ej. cada 60s) haciendo un GET a la API de Jules *solo* para las sesiones activas, buscando cambios de estado (`COMPLETED`, `WAITING_FOR_INPUT`, `FAILED`).
+- Cuando n8n detecta un cambio, hace dos acciones:
+  1. Envía el aviso por Telegram (ej. *"Jules pausó"* o *"Jules falló y no habrá PR"*).
+  2. Hace una petición local al MCP (o ejecuta un query directo si tiene acceso seguro) para actualizar el estado en `jules_jobs.db`, manteniendo la base de datos sincronizada con la realidad.
 
 ---
 
@@ -82,8 +84,8 @@ n8n se configurará para escuchar eventos de *New Pull Request* del repositorio 
 
 Es posible que Jules (el agente) necesite aclaraciones técnicas o requiera que el usuario apruebe un plan antes de generar código destructivo o realizar un PR. El sistema soporta este flujo de "ping-pong" asíncrono de la siguiente manera:
 
-1. **Jules solicita feedback:** Desde su plataforma, Jules pausa su ejecución y lanza un Webhook hacia n8n indicando: `"ID_Tarea: 1234. Necesito aprobación para el siguiente plan..."`.
-2. **Notificación de Pausa:** n8n recibe este webhook, alerta al usuario por Telegram de que se requiere su atención (y opcionalmente, notifica al servidor MCP para que actualice la base de datos a `ESPERANDO_FEEDBACK`).
+1. **Detección de la pausa:** Mediante su rutina de polling, n8n consulta la API de Jules y descubre que la sesión ha pasado a estado de espera de input.
+2. **Notificación de Pausa:** n8n alerta al usuario por Telegram de que se requiere su atención e instruye al servidor MCP para que actualice la base de datos a `ESPERANDO_FEEDBACK`.
 3. **Respuesta de Notion IA:** Notion IA lee el contexto solicitado, analiza el proyecto y, basándose en el conocimiento del usuario, utiliza la herramienta `jules_reply_to_task` pasándole la instrucción o aprobación (ej. *"Aprobado, procede con el plan 2"*).
 4. **Reanudación:** El MCP hace un llamado POST a la API de Jules entregando la respuesta. Jules reanuda la ejecución en la nube.
 
@@ -94,7 +96,7 @@ Es posible que Jules (el agente) necesite aclaraciones técnicas o requiera que 
 Se añadirán las siguientes claves de configuración al sistema, administradas mediante variables de entorno seguras (no versionadas):
 
 - `JULES_API_KEY`: Autenticación para la plataforma del agente.
-- `JULES_API_URL`: Endpoint de la plataforma de Jules (ej. `https://api.agency.ai/v1/agents/...`).
+- `JULES_API_URL`: Endpoint oficial de la plataforma (ej. `https://jules.googleapis.com/v1alpha/...`).
 - `N8N_WEBHOOK_URL`: Endpoint del webhook HTTP creado en el flujo de n8n para recibir alertas de delegación.
 
 No se requerirá despliegue de nuevos contenedores. La librería nativa de Python `sqlite3` será suficiente para gestionar la persistencia local en el volumen del MCP.
@@ -102,6 +104,6 @@ No se requerirá despliegue de nuevos contenedores. La librería nativa de Pytho
 ---
 
 ## 5. Decisiones Aprobadas
-- **Descarte del modelo Outbox/Polling:** Se aprueba eliminar las complejas colas de mensajería (outbox local) en favor de llamadas directas y eventos de GitHub, salvaguardando los recursos del VPS y de la cuota de la IA.
+- **Monitoreo Externo Asignado a n8n:** Se aprueba eliminar las complejas colas de mensajería (outbox) locales. El orquestador delegará la responsabilidad de consultar el progreso del agente (polling de estado, pausas y PRs generados) directamente a los flujos de n8n, liberando al MCP de la carga de monitoreo continuo.
 - **Independencia de Agy:** Las herramientas y persistencia de Jules vivirán en paralelo sin afectar la lógica o seguridad restrictiva de Agy.
 - **Aprobación final manual (PR):** El sistema MCP NO realizará *merges* ni despliegues a producción; Jules entregará ramas/PRs, respetando la frontera de seguridad del proyecto.
