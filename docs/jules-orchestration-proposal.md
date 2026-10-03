@@ -56,12 +56,13 @@ En el momento en que la herramienta MCP asigna la tarea con éxito, ejecuta un `
 ```
 *n8n actúa como un receptor pasivo, recibe el evento e informa al usuario por Telegram.*
 
-**Fase 2: Polling Inteligente (MCP -> API de Jules)**
+**Fase 2: Polling Inteligente y Resiliente (MCP -> API de Jules)**
 Dado que no existe un webhook push saliente oficial desde la API de Jules, **el servidor MCP asumirá el rol de monitor** mediante una tarea asíncrona en segundo plano:
-- El MCP consultará la API de Jules (ej. cada 60s) *exclusivamente* para aquellos trabajos que estén en estado activo (`EN_PROGRESO` o `PENDIENTE`) en su base de datos SQLite.
-- Cuando el MCP detecta un cambio de estado en la API (ej. a `WAITING_FOR_INPUT`, `COMPLETED` o `FAILED`), realiza dos acciones:
-  1. Actualiza inmediatamente el registro en la base de datos local `jules_jobs.db`, manteniendo su integridad como fuente única de la verdad.
-  2. Dispara un nuevo webhook push hacia n8n enviando el evento del cambio de estado, permitiendo que n8n simplemente entregue la notificación al usuario.
+- Al arrancar (incluso tras un reinicio del MCP), el monitor recuperará inmediatamente de la base de datos SQLite todas las sesiones que requieran seguimiento (ej. en cola, ejecutándose, o esperando intervención).
+- El MCP consultará la API de Jules (ej. cada 60s) *exclusivamente* para estos trabajos activos.
+- Cuando el MCP detecta un cambio de estado en la API (ej. a `AWAITING_USER_FEEDBACK`, `AWAITING_PLAN_APPROVAL`, `COMPLETED` o `FAILED`), realiza dos acciones atómicas:
+  1. Persiste el nuevo estado y el evento en la base de datos local `jules_jobs.db` para garantizar la fuente de la verdad local, agrupando internamente si es necesario pero conservando el motivo exacto de la pausa.
+  2. Tras guardar, dispara un nuevo webhook push hacia n8n enviando el evento del cambio de estado, permitiendo que n8n simplemente entregue la notificación final a Telegram.
 
 ---
 
@@ -84,7 +85,7 @@ Dado que no existe un webhook push saliente oficial desde la API de Jules, **el 
 
 Es posible que Jules (el agente) necesite aclaraciones técnicas o requiera que el usuario apruebe un plan antes de generar código destructivo o realizar un PR. El sistema soporta este flujo de "ping-pong" asíncrono de la siguiente manera:
 
-1. **Detección de la pausa:** Mediante su rutina de polling en segundo plano, el MCP descubre que la sesión en la API ha pasado a estado de espera de input. Actualiza la SQLite a `ESPERANDO_FEEDBACK`.
+1. **Detección de la pausa:** Mediante su rutina de polling en segundo plano, el MCP descubre que la sesión en la API ha pasado a `AWAITING_USER_FEEDBACK` o `AWAITING_PLAN_APPROVAL`. Persiste el estado exacto en la SQLite y prepara el aviso.
 2. **Notificación de Pausa:** El MCP dispara un webhook a n8n enviando el contexto. n8n simplemente pasa el mensaje alertando al usuario por Telegram de que se requiere su atención.
 3. **Respuesta de Notion IA:** Notion IA lee el contexto solicitado, analiza el proyecto y, basándose en el conocimiento del usuario, utiliza la herramienta `jules_reply_to_task` pasándole la instrucción o aprobación (ej. *"Aprobado, procede con el plan 2"*).
 4. **Reanudación:** El MCP hace un llamado POST a la API de Jules entregando la respuesta. Jules reanuda la ejecución en la nube.
