@@ -14,6 +14,7 @@ from dari_mcp_vps.tools.compose_tools import register_compose_tools
 from dari_mcp_vps.tools.http_tools import register_http_tools
 from dari_mcp_vps.tools.coding_jobs import register_coding_job_tools
 from dari_mcp_vps.tools.private_coding_job import register_private_coding_job_tool
+from dari_mcp_vps.tools.jules_tools import register_jules_tools
 
 CONFIG = load_config()
 mcp = FastMCP(CONFIG.raw.get("server", {}).get("name", "IA MCP VPS"))
@@ -27,6 +28,7 @@ register_compose_tools(mcp, CONFIG)
 register_http_tools(mcp, CONFIG)
 register_coding_job_tools(mcp, CONFIG)
 register_private_coding_job_tool(mcp, CONFIG)
+register_jules_tools(mcp, CONFIG)
 
 
 def main() -> None:

@@ -45,6 +45,16 @@ Notion IA
 
 Consulta [`docs/coding-jobs.md`](docs/coding-jobs.md) para contratos, estados, límites y procedimiento de promoción.
 
+## Configuración de Jules (Milestone 1)
+
+El orquestador incluye soporte parcial asíncrono para delegar tareas al agente Jules sin esperar su finalización. Esto requiere las siguientes variables de entorno:
+
+- `JULES_API_KEY`: Tu clave de API para la plataforma Jules.
+- `JULES_API_URL`: Opcional, por defecto `https://jules.googleapis.com/v1alpha`.
+- `JULES_DB_PATH`: Opcional, por defecto `/var/lib/coding-jobs/jules_jobs.db`.
+
+Las herramientas disponibles son `jules_request_coding_task` y `jules_check_task_status`.
+
 ## Transporte remoto
 
 FastMCP corre por HTTP en el puerto interno `8787`. Docker publica únicamente:
