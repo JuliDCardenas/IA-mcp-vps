@@ -53,6 +53,14 @@ El orquestador incluye soporte parcial asíncrono para delegar tareas al agente 
 - `JULES_API_URL`: Opcional, por defecto `https://jules.googleapis.com/v1alpha`.
 - `JULES_DB_PATH`: Opcional, por defecto `/var/lib/coding-jobs/jules_jobs.db`.
 
+**Configuración segura en el VPS:**
+1. Crear o editar el archivo `.env` en la raíz del proyecto (`~/IA-mcp-vps/.env`).
+2. Añadir la clave de forma segura sin comillas:
+   ```env
+   JULES_API_KEY=tu_clave_real_aqui
+   ```
+3. Reiniciar el contenedor: `docker compose up -d ia-mcp-vps`
+
 Las herramientas disponibles son `jules_request_coding_task` y `jules_check_task_status`.
 
 ## Transporte remoto

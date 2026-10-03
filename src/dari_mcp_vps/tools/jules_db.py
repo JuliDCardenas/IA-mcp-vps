@@ -19,9 +19,17 @@ def init_db(db_path: str) -> None:
                 jules_agent_job_id TEXT,
                 status TEXT NOT NULL,
                 created_at TIMESTAMP NOT NULL,
-                updated_at TIMESTAMP NOT NULL
+                updated_at TIMESTAMP NOT NULL,
+                remote_state TEXT
             )
         """)
+
+        # Safely add the column if the table already existed without it
+        try:
+            cursor.execute("ALTER TABLE jules_jobs ADD COLUMN remote_state TEXT")
+        except sqlite3.OperationalError:
+            pass # Column likely already exists
+
         conn.commit()
 
 def create_job(db_path: str, repo_name: str, task_description: str) -> str:
@@ -52,17 +60,24 @@ def update_job_remote_id(db_path: str, job_id: str, remote_id: str) -> None:
         """, (remote_id, now, job_id))
         conn.commit()
 
-def update_job_status(db_path: str, job_id: str, status: str) -> None:
+def update_job_status(db_path: str, job_id: str, status: str, remote_state: Optional[str] = None) -> None:
     """Update a job status."""
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE jules_jobs
-            SET status = ?, updated_at = ?
-            WHERE id = ?
-        """, (status, now, job_id))
+        if remote_state is not None:
+            cursor.execute("""
+                UPDATE jules_jobs
+                SET status = ?, updated_at = ?, remote_state = ?
+                WHERE id = ?
+            """, (status, now, remote_state, job_id))
+        else:
+            cursor.execute("""
+                UPDATE jules_jobs
+                SET status = ?, updated_at = ?
+                WHERE id = ?
+            """, (status, now, job_id))
         conn.commit()
 
 def get_job(db_path: str, job_id: str) -> Optional[Dict[str, Any]]:
