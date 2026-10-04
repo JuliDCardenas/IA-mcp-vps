@@ -28,7 +28,7 @@ def _target(config: dict[str, Any], name: str) -> dict[str, Any]:
 
 
 def register_http_tools(mcp: Any, app_config: Any) -> None:
-    @mcp.tool(tags=["vps"])
+    @mcp.tool(tags=["vps"], annotations={"readOnlyHint": True})
     def http_probe(target: str, timeout_s: float = 5.0) -> dict[str, Any]:
         """Probe an allowlisted HTTP target and return status, latency and truncated response."""
         cfg = _target(app_config.raw, target)

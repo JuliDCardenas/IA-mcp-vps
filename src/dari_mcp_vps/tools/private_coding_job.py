@@ -12,7 +12,7 @@ SCRIPT = "/opt/agy-job/run-implementation-job.sh"
 
 
 def register_private_coding_job_tool(mcp: Any, app_config: Any) -> None:
-    @mcp.tool(tags=["agy"])
+    @mcp.tool(tags=["agy"], annotations={"readOnlyHint": False})
     def coding_private_job_create(
         goal: str,
         acceptance_criteria: list[str],

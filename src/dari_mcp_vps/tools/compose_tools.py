@@ -70,7 +70,7 @@ def _container_name(container: dict[str, Any]) -> str:
 
 
 def register_compose_tools(mcp: Any, app_config: Any) -> None:
-    @mcp.tool(tags=["vps"])
+    @mcp.tool(tags=["vps"], annotations={"readOnlyHint": True})
     def docker_compose_config(project: str) -> dict[str, Any]:
         """Validate an allowlisted Docker Compose YAML structurally and return safe summary. Does not require docker CLI."""
         compose_file = _compose_path(app_config.raw, project)
@@ -88,7 +88,7 @@ def register_compose_tools(mcp: Any, app_config: Any) -> None:
         networks = sorted(networks_obj.keys()) if isinstance(networks_obj, dict) else []
         return {"ok": True, "project": project, "compose_file": str(compose_file), "services": services, "volumes": volumes, "networks": networks, "note": "structural YAML validation only; no Docker interpolation"}
 
-    @mcp.tool(tags=["vps"])
+    @mcp.tool(tags=["vps"], annotations={"readOnlyHint": True})
     def docker_compose_ps(project: str) -> dict[str, Any]:
         """Return Docker Compose project containers using labels and configured container_names. Does not require docker CLI."""
         project_cfg = _project_config(app_config.raw, project)
@@ -108,7 +108,7 @@ def register_compose_tools(mcp: Any, app_config: Any) -> None:
             })
         return {"ok": True, "project": project, "containers": rows}
 
-    @mcp.tool(tags=["vps"])
+    @mcp.tool(tags=["vps"], annotations={"readOnlyHint": True})
     def docker_compose_logs(project: str, service: str | None = None, lines: int = 100, grep: str | None = None, case_sensitive: bool = False) -> str:
         """Return recent logs from an allowlisted Docker Compose project/service using labels/container_names."""
         project_cfg = _project_config(app_config.raw, project)

@@ -80,6 +80,56 @@ El servidor organiza sus herramientas en cuatro grupos principales para facilita
 - **jules**: Integración con el orquestador Jules.
   - *Herramientas:* `jules_request_coding_task`, `jules_reply_to_task`, `jules_check_task_status`.
 
+### Inventario de Lectura/Escritura (`readOnlyHint`)
+
+Todas las herramientas exponen metadatos en `annotations.readOnlyHint` indicando si la herramienta es únicamente de lectura (True) o si tiene capacidad de modificar estado (False). Los clientes MCP utilizan este campo para distinguir visualmente (e.g. colores o confirmaciones).
+
+| Herramienta | Tag | readOnlyHint |
+| :--- | :--- | :--- |
+| `system_status` | vps | True |
+| `check_ports` | vps | True |
+| `docker_ps` | vps | True |
+| `container_inspect` | vps | True |
+| `docker_logs` | vps | True |
+| `docker_logs_filtered` | vps | True |
+| `docker_restart` | vps | False |
+| `docker_compose_config` | vps | True |
+| `docker_compose_ps` | vps | True |
+| `docker_compose_logs` | vps | True |
+| `http_probe` | vps | True |
+| `list_files` | repositorios_archivos | True |
+| `file_info` | repositorios_archivos | True |
+| `read_file` | repositorios_archivos | True |
+| `read_file_range` | repositorios_archivos | True |
+| `tail_file` | repositorios_archivos | True |
+| `search_text` | repositorios_archivos | True |
+| `validate_yaml` | repositorios_archivos | True |
+| `validate_json` | repositorios_archivos | True |
+| `git_status` | repositorios_archivos | True |
+| `coding_repository_list` | agy | False |
+| `coding_job_create` | agy | False |
+| `coding_job_status` | agy | False |
+| `coding_job_wait` | agy | False |
+| `coding_job_result` | agy | False |
+| `coding_job_changes` | agy | False |
+| `coding_job_artifact` | agy | False |
+| `coding_job_request_revision` | agy | False |
+| `coding_job_validate_only` | agy | False |
+| `coding_job_apply_mechanical_operation` | agy | False |
+| `coding_job_approve_changes` | agy | False |
+| `coding_job_publish_branch` | agy | False |
+| `coding_job_create_pull_request` | agy | False |
+| `coding_job_cancel` | agy | False |
+| `coding_job_cleanup` | agy | False |
+| `coding_private_job_create` | agy | False |
+| `jules_request_coding_task` | jules | False |
+| `jules_reply_to_task` | jules | False |
+| `jules_check_task_status` | jules | False |
+
+**Notas sobre casos mixtos:**
+- `http_probe`: Funcionalmente utilizado para diagnosticar que un endpoint responda con HTTP 200 (estado de salud). Se marca como `readOnlyHint=True` conservadoramente para uso libre del agente en sus diagnósticos, a pesar de que la petición HTTP (a menudo GET) pueda, teóricamente, incidir en contadores o log del servidor expuesto.
+- Consultas Agy/Jules (ej. `coding_job_wait`, `jules_check_task_status`): Se consideran `False` (modifican estado) porque su implementación real inicializa bases de datos SQLite o crea directorios en disco al instanciar gestores perezosos, aunque funcionalmente sirvan para lectura.
+
 ## Transporte remoto
 
 FastMCP corre por HTTP en el puerto interno `8787`. Docker publica únicamente:

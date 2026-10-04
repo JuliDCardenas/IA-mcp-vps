@@ -1,12 +1,12 @@
 import shutil, socket, psutil
 
 def register_system_tools(mcp, app_config):
-    @mcp.tool(tags=["vps"])
+    @mcp.tool(tags=["vps"], annotations={"readOnlyHint": True})
     def system_status():
         """Return basic VPS health."""
         return {'cpu_percent': psutil.cpu_percent(interval=0.2), 'memory': dict(psutil.virtual_memory()._asdict()), 'boot_time': psutil.boot_time(), 'disk_root': dict(shutil.disk_usage('/')._asdict())}
 
-    @mcp.tool(tags=["vps"])
+    @mcp.tool(tags=["vps"], annotations={"readOnlyHint": True})
     def check_ports(host: str, ports: list[int], timeout_s: float = 2.0):
         """Check TCP ports."""
         out = {}
