@@ -286,7 +286,7 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
             return asdict(job)
         return _read_json(job_id, "job.json")
 
-    @mcp.tool(tags=["agy"], annotations={"readOnlyHint": True})
+    @mcp.tool(tags=["agy"], annotations={"readOnlyHint": False})
     def coding_repository_list(
         installation_id: int,
         page: int = 1,
@@ -405,12 +405,12 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
         _exec([TASK_SCRIPTS[task_type], job_id, encoded], detach=True)
         return {"job_id": job_id, "status": "CREATED", "repository": repository, "task_type": task_type}
 
-    @mcp.tool(tags=["agy"], annotations={"readOnlyHint": True})
+    @mcp.tool(tags=["agy"], annotations={"readOnlyHint": False})
     def coding_job_status(job_id: str) -> dict[str, Any]:
         """Return the current state and timestamps for an Agy coding job."""
         return status_payload(job_id)
 
-    @mcp.tool(tags=["agy"], annotations={"readOnlyHint": True})
+    @mcp.tool(tags=["agy"], annotations={"readOnlyHint": False})
     def coding_job_wait(job_id: str, timeout_seconds: int = 90, poll_seconds: int = 2) -> dict[str, Any]:
         """Wait a bounded time for a coding job to reach a terminal state."""
         timeout_seconds = min(max(int(timeout_seconds), 1), 120)
@@ -422,7 +422,7 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
             status = status_payload(job_id)
         return {**status, "wait_timed_out": status.get("status") not in TERMINAL_STATES}
 
-    @mcp.tool(tags=["agy"], annotations={"readOnlyHint": True})
+    @mcp.tool(tags=["agy"], annotations={"readOnlyHint": False})
     def coding_job_result(job_id: str) -> dict[str, Any]:
         """Return the bounded structured result or sanitized failure diagnostics."""
         if is_persistent_job(job_id):
@@ -471,7 +471,7 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
             "diagnostic": diagnostic,
         }
 
-    @mcp.tool(tags=["agy"], annotations={"readOnlyHint": True})
+    @mcp.tool(tags=["agy"], annotations={"readOnlyHint": False})
     def coding_job_changes(job_id: str) -> dict[str, Any]:
         """Return the validated changed-file manifest for an implementation job."""
         if is_persistent_job(job_id):
@@ -487,7 +487,7 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
         manifest = _read_json(job_id, "manifest.json")
         return {"job_id": job_id, **manifest}
 
-    @mcp.tool(tags=["agy"], annotations={"readOnlyHint": True})
+    @mcp.tool(tags=["agy"], annotations={"readOnlyHint": False})
     def coding_job_artifact(job_id: str, path: str) -> dict[str, Any]:
         """Return one validated changed text file from an isolated implementation job."""
         clean_path = _validate_artifact_path(path)

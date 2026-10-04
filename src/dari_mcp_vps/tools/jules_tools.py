@@ -204,7 +204,7 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
                 full_err = full_err.replace(app_config.jules_api_key, "***REDACTED***")
             return {"error": f"Failed to contact Jules API or connection timed out: {full_err[:100]}", "task_id": task_id, "status": "ERROR"}
 
-    @mcp.tool(tags=["jules"], annotations={"readOnlyHint": True})
+    @mcp.tool(tags=["jules"], annotations={"readOnlyHint": False})
     def jules_check_task_status(task_id: str) -> dict[str, Any]:
         """Check the status of a previously requested Jules coding task."""
         try:

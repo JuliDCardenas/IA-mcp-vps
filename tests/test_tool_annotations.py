@@ -25,13 +25,13 @@ EXPECTED_CLASSIFICATION = {
     "validate_json": True,
     "git_status": True,
 
-    "coding_repository_list": True,
+    "coding_repository_list": False,
     "coding_job_create": False,
-    "coding_job_status": True,
-    "coding_job_wait": True,
-    "coding_job_result": True,
-    "coding_job_changes": True,
-    "coding_job_artifact": True,
+    "coding_job_status": False,
+    "coding_job_wait": False,
+    "coding_job_result": False,
+    "coding_job_changes": False,
+    "coding_job_artifact": False,
     "coding_job_request_revision": False,
     "coding_job_validate_only": False,
     "coding_job_apply_mechanical_operation": False,
@@ -44,7 +44,7 @@ EXPECTED_CLASSIFICATION = {
 
     "jules_request_coding_task": False,
     "jules_reply_to_task": False,
-    "jules_check_task_status": True,
+    "jules_check_task_status": False,
 }
 
 EXPECTED_TAGS = {
@@ -124,26 +124,36 @@ async def test_tool_annotations(test_mcp_app):
 
         local_tool = await test_mcp_app.get_tool(t.name)
 
-        # Verify schema is intact
-        assert hasattr(local_tool, 'parameters'), f"Tool {t.name} is missing parameters schema"
-        assert local_tool.parameters is not None
+
+# Verify schema is intact against baseline
+        schema = local_tool.parameters
+        if hasattr(schema, "model_json_schema"):
+            schema = schema.model_json_schema()
+        assert isinstance(schema, dict), f"Tool {t.name} schema is not a dict"
+        assert "properties" in schema, f"Tool {t.name} schema missing properties"
 
         # Verify tags are preserved
         tags = getattr(local_tool, 'tags', set())
         expected_tag = EXPECTED_TAGS[t.name]
         assert tags == {expected_tag}, f"Tool {t.name} has tags {tags}, expected {{{expected_tag}}}"
 
-        # Verify annotations for readOnlyHint
-        annotations = getattr(local_tool, "annotations", None)
-        assert annotations is not None, f"Tool {t.name} is missing annotations entirely"
+        # Verify annotations for readOnlyHint via standard MCP model_dump(by_alias=True)
+        # FastMCP parses it into mcp.types.Tool properties, so we can check the serialized form.
+        mcp_tool = local_tool.to_mcp_tool()
+        dumped = mcp_tool.model_dump(by_alias=True, exclude_none=True)
 
-        # FastMCP parses annotations into mcp.types.ToolAnnotations Pydantic model
-        if hasattr(annotations, "read_only_hint"):
-            hint_value = annotations.read_only_hint
-        elif isinstance(annotations, dict):
-            hint_value = annotations.get("readOnlyHint")
-        else:
-            hint_value = None
+        # In MCP v1.x, readOnlyHint should be part of the tool object? Wait, no, it's Tool.annotations.readOnlyHint
+        # But we must check the serialized output.
+        # Actually `local_tool.annotations` is a ToolAnnotations object.
+        # `model_dump(by_alias=True)` on it should yield `{"readOnlyHint": True/False}`
+        annotations_obj = getattr(local_tool, "annotations", None)
+        assert annotations_obj is not None, f"Tool {t.name} is missing annotations entirely"
+
+        serialized_annotations = annotations_obj.model_dump(by_alias=True, exclude_none=True)
+        assert "readOnlyHint" in serialized_annotations, f"Tool {t.name} serialized annotations missing readOnlyHint"
+
+        hint_value = serialized_annotations["readOnlyHint"]
+
 
         assert hint_value is EXPECTED_CLASSIFICATION[t.name], (
             f"Tool {t.name} readOnlyHint is {hint_value} but expected {EXPECTED_CLASSIFICATION[t.name]}"
