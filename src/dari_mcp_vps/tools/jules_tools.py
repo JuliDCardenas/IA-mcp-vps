@@ -3,7 +3,8 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from dari_mcp_vps.tools.jules_db import init_db, create_job, update_job_remote_id, get_job, update_job_status
+import datetime
+from dari_mcp_vps.tools.jules_db import init_db, create_job, update_job_remote_id, get_job, update_job_status, set_followup_pending
 
 
 def register_jules_tools(mcp: Any, app_config: Any) -> None:
@@ -180,12 +181,25 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
             with urllib.request.urlopen(req, timeout=20) as resp:
                 # Discard response body but ensure it was successful
                 resp.read()
+
+            try:
+                set_followup_pending(db_path, task_id, True)
+            except Exception as e:
+                # Persistence failed but remote accepted. We must return success but inform of persistence issue.
                 return {
+                    "error": f"Message sent successfully to Jules, but failed to save local state tracking: {e}",
                     "task_id": task_id,
                     "jules_agent_job_id": session_id,
                     "status": "SENT",
                     "message": "Message successfully sent to the remote session."
                 }
+
+            return {
+                "task_id": task_id,
+                "jules_agent_job_id": session_id,
+                "status": "SENT",
+                "message": "Message successfully sent to the remote session."
+            }
         except urllib.error.HTTPError as e:
             try:
                 # Redact first, then truncate
@@ -202,7 +216,14 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
             full_err = str(e)
             if app_config.jules_api_key in full_err:
                 full_err = full_err.replace(app_config.jules_api_key, "***REDACTED***")
-            return {"error": f"Failed to contact Jules API or connection timed out: {full_err[:100]}", "task_id": task_id, "status": "ERROR"}
+
+            # Outcome is uncertain (e.g. timeout), so we activate tracking to reconcile
+            try:
+                set_followup_pending(db_path, task_id, True)
+            except Exception:
+                pass
+
+            return {"error": f"Failed to contact Jules API or connection timed out: {full_err[:100]}", "task_id": task_id, "status": "DESCONOCIDO"}
 
     @mcp.tool(tags=["jules"], annotations={"readOnlyHint": False})
     def jules_check_task_status(task_id: str) -> dict[str, Any]:
@@ -227,3 +248,76 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
             "created_at": job["created_at"],
             "updated_at": job["updated_at"]
         }
+
+    @mcp.tool(tags=["jules"], annotations={"readOnlyHint": True})
+    def jules_get_task_activities(task_id: str, page_size: int = 20, page_token: str | None = None) -> dict[str, Any]:
+        """Get a paginated list of activities for a specific Jules task."""
+        if not app_config.jules_api_key:
+            return {"error": "JULES_API_KEY is not configured"}
+
+        try:
+            db_path = _get_db()
+        except RuntimeError as e:
+            return {"error": str(e)}
+
+        job = get_job(db_path, task_id)
+        if not job:
+            return {"error": f"Task ID {task_id} not found locally."}
+
+        session_id = job.get("jules_agent_job_id")
+        if not session_id:
+            return {"error": f"Task ID {task_id} does not have a remote session ID."}
+
+        url = f"{app_config.jules_api_url}/{session_id}/activities?pageSize={page_size}"
+        if page_token:
+            url += f"&pageToken={page_token}"
+
+        req = urllib.request.Request(
+            url,
+            method="GET",
+            headers={"X-Goog-Api-Key": app_config.jules_api_key}
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+
+                # Format activities to reduce size/noise
+                formatted_activities = []
+                for act in data.get("activities", []):
+                    # We just copy it but truncate any large fields
+                    fmt_act = {"id": act.get("id"), "activityType": act.get("activityType"), "createTime": act.get("createTime")}
+
+                    if "agentMessaged" in act:
+                        msg = act["agentMessaged"].get("agentMessage", "")
+                        fmt_act["agentMessage"] = msg[:1000] + ("..." if len(msg) > 1000 else "")
+                    elif "planGenerated" in act:
+                        fmt_act["planGenerated"] = True
+                    elif "sessionCompleted" in act:
+                        fmt_act["sessionCompleted"] = True
+                    elif "sessionFailed" in act:
+                        fmt_act["sessionFailed"] = act["sessionFailed"]
+
+                    formatted_activities.append(fmt_act)
+
+                return {
+                    "source": "api",
+                    "consulted_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "activities": formatted_activities,
+                    "nextPageToken": data.get("nextPageToken")
+                }
+
+        except urllib.error.HTTPError as e:
+            try:
+                full_body = e.read().decode('utf-8')
+                if app_config.jules_api_key in full_body:
+                    full_body = full_body.replace(app_config.jules_api_key, "***REDACTED***")
+                error_body = full_body[:200]
+            except Exception:
+                error_body = "Unknown body"
+            return {"error": f"Jules API HTTP error {e.code}: {error_body}"}
+        except Exception as e:
+            full_err = str(e)
+            if app_config.jules_api_key in full_err:
+                full_err = full_err.replace(app_config.jules_api_key, "***REDACTED***")
+            return {"error": f"Failed to contact Jules API: {full_err[:100]}"}

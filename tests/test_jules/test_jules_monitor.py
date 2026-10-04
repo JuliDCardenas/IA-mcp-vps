@@ -64,6 +64,18 @@ async def test_monitor_state_transition_and_webhook(mock_sleep, mock_config):
     with patch("urllib.request.urlopen") as mock_urlopen:
         mock_urlopen.return_value.__enter__.return_value = jules_resp
 
+    activities_resp = MagicMock()
+    activities_resp.read.return_value = json.dumps({"activities": []}).encode("utf-8")
+    activities_resp.status = 200
+
+    def urlopen_side_effect(req, *args, **kwargs):
+        if hasattr(req, "full_url") and "activities" in req.full_url:
+            return MagicMock(__enter__=lambda _: activities_resp, __exit__=lambda *a: None)
+        return MagicMock(__enter__=lambda _: jules_resp, __exit__=lambda *a: None)
+
+    with patch("urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.side_effect = urlopen_side_effect
+
         # We need to mock sleep to run the loop exactly once
         mock_sleep.side_effect = [None, Exception("Stop loop")]
         try:
@@ -112,6 +124,20 @@ async def test_monitor_completed_with_pr_and_webhook_retry(mock_sleep, mock_conf
         req = args[0]
         if hasattr(req, "full_url") and "n8n" in req.full_url:
             return MagicMock(__enter__=lambda _: webhook_resp, __exit__=lambda *a: None)
+        else:
+            return MagicMock(__enter__=lambda _: jules_resp, __exit__=lambda *a: None)
+
+    # Mock both the session call and the activities call
+    activities_resp = MagicMock()
+    activities_resp.read.return_value = json.dumps({"activities": []}).encode("utf-8")
+    activities_resp.status = 200
+
+    def side_effect_func(*args, **kwargs):
+        req = args[0]
+        if hasattr(req, "full_url") and "n8n" in req.full_url:
+            return MagicMock(__enter__=lambda _: webhook_resp, __exit__=lambda *a: None)
+        elif hasattr(req, "full_url") and "activities" in req.full_url:
+            return MagicMock(__enter__=lambda _: activities_resp, __exit__=lambda *a: None)
         else:
             return MagicMock(__enter__=lambda _: jules_resp, __exit__=lambda *a: None)
 
@@ -190,11 +216,17 @@ async def test_monitor_resume_after_feedback_and_restart(mock_sleep, mock_config
             else:
                 return MagicMock(__enter__=lambda _: jules_resp_completed, __exit__=lambda *a: None)
 
+    activities_resp = MagicMock()
+    activities_resp.read.return_value = json.dumps({"activities": []}).encode("utf-8")
+    activities_resp.status = 200
+
     jules_call_count = 0
     def jules_side_effect(req, *args, **kwargs):
         nonlocal jules_call_count
         if hasattr(req, "full_url") and "n8n" in req.full_url:
             return MagicMock(__enter__=lambda _: webhook_resp, __exit__=lambda *a: None)
+        elif hasattr(req, "full_url") and "activities" in req.full_url:
+            return MagicMock(__enter__=lambda _: activities_resp, __exit__=lambda *a: None)
         else:
             jules_call_count += 1
             if jules_call_count == 1:
@@ -233,3 +265,60 @@ async def test_monitor_resume_after_feedback_and_restart(mock_sleep, mock_config
 
         event_2 = json.loads(dict(events[1])["payload"])
         assert event_2["remote_state"] == "COMPLETED"
+
+@patch("asyncio.sleep", new_callable=AsyncMock)
+@pytest.mark.asyncio
+async def test_monitor_agent_messaged_activity(mock_sleep, mock_config):
+    job_id = create_job(mock_config.jules_db_path, "my-repo", "Task 1")
+    update_job_remote_id(mock_config.jules_db_path, job_id, "sessions/123")
+
+    # Simulating a state that hasn't changed but with new activities
+    jules_resp = MagicMock()
+    jules_resp.read.return_value = json.dumps({"state": "AWAITING_USER_FEEDBACK"}).encode("utf-8")
+    jules_resp.status = 200
+
+    import datetime
+    now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    activities_resp = MagicMock()
+    activities_resp.read.return_value = json.dumps({
+        "activities": [
+            {
+                "id": "act-1",
+                "activityType": "AGENT_MESSAGED",
+                "createTime": now_str,
+                "agentMessaged": {"agentMessage": "Please clarify."}
+            }
+        ]
+    }).encode("utf-8")
+    activities_resp.status = 200
+
+    def urlopen_side_effect(req, *args, **kwargs):
+        if hasattr(req, "full_url") and "activities" in req.full_url:
+            return MagicMock(__enter__=lambda _: activities_resp, __exit__=lambda *a: None)
+        return MagicMock(__enter__=lambda _: jules_resp, __exit__=lambda *a: None)
+
+    with patch("urllib.request.urlopen") as mock_urlopen:
+        mock_urlopen.side_effect = urlopen_side_effect
+
+        mock_sleep.side_effect = [None, Exception("Stop loop")]
+        try:
+            await background_monitor(mock_config)
+        except Exception as e:
+            if str(e) != "Stop loop":
+                raise
+
+    with sqlite3.connect(mock_config.jules_db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        # We should have an event for STATE_CHANGED and an event for AGENT_MESSAGE
+        # actually, because we don't have remote_state yet locally, it will emit a STATE_CHANGED
+        # AND it will emit an AGENT_MESSAGE
+        cursor.execute("SELECT payload, event_type FROM jules_events WHERE job_id = ? ORDER BY created_at ASC", (job_id,))
+        events = cursor.fetchall()
+
+        agent_messages = [json.loads(e["payload"]) for e in events if e["event_type"] == "AGENT_MESSAGE"]
+        assert len(agent_messages) == 1
+        assert agent_messages[0]["context"] == "Please clarify."
+        assert agent_messages[0]["activity_id"] == "act-1"
