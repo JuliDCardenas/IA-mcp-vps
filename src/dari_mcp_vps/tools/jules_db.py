@@ -35,9 +35,26 @@ def init_db(db_path: str) -> None:
             )
         """)
 
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS jules_processed_activities (
+                activity_id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL
+            )
+        """)
+
         # Safely add the column if the table already existed without it
         try:
             cursor.execute("ALTER TABLE jules_jobs ADD COLUMN remote_state TEXT")
+        except sqlite3.OperationalError:
+            pass # Column likely already exists
+
+        try:
+            cursor.execute("ALTER TABLE jules_jobs ADD COLUMN followup_pending_since TIMESTAMP")
+        except sqlite3.OperationalError:
+            pass # Column likely already exists
+
+        try:
+            cursor.execute("ALTER TABLE jules_jobs ADD COLUMN activities_cursor TEXT")
         except sqlite3.OperationalError:
             pass # Column likely already exists
 
@@ -48,8 +65,41 @@ def get_active_jobs(db_path: str) -> list[Dict[str, Any]]:
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM jules_jobs WHERE status IN ('EN_PROGRESO', 'PENDIENTE', 'ESPERANDO_FEEDBACK') AND jules_agent_job_id IS NOT NULL")
+        cursor.execute("SELECT * FROM jules_jobs WHERE (status IN ('EN_PROGRESO', 'PENDIENTE', 'ESPERANDO_FEEDBACK') OR followup_pending_since IS NOT NULL OR activities_cursor IS NOT NULL) AND jules_agent_job_id IS NOT NULL")
         return [dict(row) for row in cursor.fetchall()]
+
+def is_activity_processed(db_path: str, activity_id: str) -> bool:
+    """Check if an activity has already been processed."""
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM jules_processed_activities WHERE activity_id = ?", (activity_id,))
+        return cursor.fetchone() is not None
+
+def record_activity_processed(db_path: str, job_id: str, activity_id: str) -> None:
+    """Record that an activity has been processed."""
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT OR IGNORE INTO jules_processed_activities (activity_id, job_id)
+            VALUES (?, ?)
+        """, (activity_id, job_id))
+        conn.commit()
+
+def set_followup_pending(db_path: str, job_id: str, is_pending: bool, pending_since_iso: Optional[str] = None) -> None:
+    """Set or clear the followup_pending_since flag."""
+    if is_pending:
+        val = pending_since_iso if pending_since_iso else datetime.datetime.now(datetime.timezone.utc).isoformat()
+    else:
+        val = None
+
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE jules_jobs
+            SET followup_pending_since = ?
+            WHERE id = ?
+        """, (val, job_id))
+        conn.commit()
 
 def record_event(db_path: str, job_id: str, event_type: str, payload_dict: Dict[str, Any]) -> None:
     """Record a webhook event for a job, injecting event_id and timestamp into the payload."""
@@ -68,6 +118,44 @@ def record_event(db_path: str, job_id: str, event_type: str, payload_dict: Dict[
             INSERT INTO jules_events (id, job_id, event_type, payload, status, created_at)
             VALUES (?, ?, ?, ?, 'PENDING', ?)
         """, (event_id, job_id, event_type, payload_str, now))
+        conn.commit()
+
+def record_activity_and_event(db_path: str, job_id: str, activity_id: str, event_type: Optional[str] = None, payload_dict: Optional[Dict[str, Any]] = None) -> None:
+    """Record an activity as processed and optionally record a webhook event transactionally."""
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT OR IGNORE INTO jules_processed_activities (activity_id, job_id)
+            VALUES (?, ?)
+        """, (activity_id, job_id))
+
+        # Only emit event if activity was actually inserted (not ignored)
+        if cursor.rowcount > 0 and event_type and payload_dict is not None:
+            event_id = str(uuid.uuid4())
+            now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+            payload_dict["event_id"] = event_id
+            payload_dict["timestamp"] = now
+
+            import json
+            payload_str = json.dumps(payload_dict)
+
+            cursor.execute("""
+                INSERT INTO jules_events (id, job_id, event_type, payload, status, created_at)
+                VALUES (?, ?, ?, ?, 'PENDING', ?)
+            """, (event_id, job_id, event_type, payload_str, now))
+
+        conn.commit()
+
+def update_job_activities_cursor(db_path: str, job_id: str, cursor_token: Optional[str]) -> None:
+    """Update the activities cursor for pagination."""
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE jules_jobs
+            SET activities_cursor = ?
+            WHERE id = ?
+        """, (cursor_token, job_id))
         conn.commit()
 
 def get_pending_events(db_path: str) -> list[Dict[str, Any]]:

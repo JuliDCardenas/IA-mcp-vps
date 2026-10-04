@@ -45,6 +45,7 @@ EXPECTED_CLASSIFICATION = {
     "jules_request_coding_task": False,
     "jules_reply_to_task": False,
     "jules_check_task_status": False,
+    "jules_get_task_activities": False,
 }
 
 EXPECTED_TAGS = {
@@ -90,6 +91,7 @@ EXPECTED_TAGS = {
     "jules_request_coding_task": "jules",
     "jules_reply_to_task": "jules",
     "jules_check_task_status": "jules",
+    "jules_get_task_activities": "jules",
 }
 
 @pytest.fixture

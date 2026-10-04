@@ -77,6 +77,14 @@ def test_reply_to_task_success(mock_urlopen, mcp_app):
     payload = json.loads(req_arg.data.decode("utf-8"))
     assert payload["prompt"] == "Fix this issue"
 
+    # Verify followup_pending_since was set
+    with sqlite3.connect(config.jules_db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT followup_pending_since FROM jules_jobs WHERE id = ?", (job_id,))
+        row = cursor.fetchone()
+        assert row is not None
+        assert row[0] is not None
+
 def test_reply_to_task_not_found(mcp_app):
     tools, config = mcp_app
     reply_tool = tools["jules_reply_to_task"]
@@ -97,7 +105,7 @@ def test_reply_to_task_api_error_sanitization(mock_urlopen, mcp_app):
     mock_urlopen.side_effect = generic_error
 
     result = reply_tool(job_id, "msg")
-    assert result["status"] == "ERROR"
+    assert result["status"] == "DESCONOCIDO"
     assert "***REDACTED***" in result["error"]
     assert config.jules_api_key not in result["error"]
 
@@ -122,3 +130,11 @@ def test_reply_to_task_api_error_truncation(mock_urlopen, mcp_app):
     assert config.jules_api_key not in result["error"]
     # Check that it did truncate correctly and redacted the part it could
     assert len(result["error"]) <= 250 # 200 body + prefix
+
+    # Verify followup_pending_since was NOT set
+    with sqlite3.connect(config.jules_db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT followup_pending_since FROM jules_jobs WHERE id = ?", (job_id,))
+        row = cursor.fetchone()
+        assert row is not None
+        assert row[0] is None
