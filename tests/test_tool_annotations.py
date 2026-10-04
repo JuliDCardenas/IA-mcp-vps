@@ -45,7 +45,7 @@ EXPECTED_CLASSIFICATION = {
     "jules_request_coding_task": False,
     "jules_reply_to_task": False,
     "jules_check_task_status": False,
-    "jules_get_task_activities": True,
+    "jules_get_task_activities": False,
 }
 
 EXPECTED_TAGS = {

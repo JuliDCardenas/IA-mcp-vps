@@ -177,17 +177,20 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
             data=json.dumps(payload).encode("utf-8")
         )
 
+        # Capture baseline before making the request to avoid missing fast responses during a slow POST
+        request_start_time = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
         try:
             with urllib.request.urlopen(req, timeout=20) as resp:
                 # Discard response body but ensure it was successful
                 resp.read()
 
             try:
-                set_followup_pending(db_path, task_id, True)
+                set_followup_pending(db_path, task_id, True, pending_since_iso=request_start_time)
             except Exception as e:
                 # Persistence failed but remote accepted. We must return success but inform of persistence issue.
                 return {
-                    "error": f"Message sent successfully to Jules, but failed to save local state tracking: {e}",
+                    "error": f"Message sent successfully to Jules, but failed to save local state tracking: {str(e)[:100]}",
                     "task_id": task_id,
                     "jules_agent_job_id": session_id,
                     "status": "SENT",
@@ -219,7 +222,7 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
 
             # Outcome is uncertain (e.g. timeout), so we activate tracking to reconcile
             try:
-                set_followup_pending(db_path, task_id, True)
+                set_followup_pending(db_path, task_id, True, pending_since_iso=request_start_time)
             except Exception:
                 pass
 
@@ -249,11 +252,15 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
             "updated_at": job["updated_at"]
         }
 
-    @mcp.tool(tags=["jules"], annotations={"readOnlyHint": True})
+    @mcp.tool(tags=["jules"], annotations={"readOnlyHint": False})
     def jules_get_task_activities(task_id: str, page_size: int = 20, page_token: str | None = None) -> dict[str, Any]:
-        """Get a paginated list of activities for a specific Jules task."""
+        """Get a paginated list of activities for a specific Jules task.
+        Use page_token from the previous response to get the next page.
+        Do not query this repeatedly without a page token. Limits to 1-100 items per page."""
         if not app_config.jules_api_key:
             return {"error": "JULES_API_KEY is not configured"}
+
+        page_size = max(1, min(100, page_size))
 
         try:
             db_path = _get_db()
@@ -270,7 +277,8 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
 
         url = f"{app_config.jules_api_url}/{session_id}/activities?pageSize={page_size}"
         if page_token:
-            url += f"&pageToken={page_token}"
+            import urllib.parse
+            url += f"&pageToken={urllib.parse.quote(page_token)}"
 
         req = urllib.request.Request(
             url,
@@ -292,11 +300,13 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
                         msg = act["agentMessaged"].get("agentMessage", "")
                         fmt_act["agentMessage"] = msg[:1000] + ("..." if len(msg) > 1000 else "")
                     elif "planGenerated" in act:
-                        fmt_act["planGenerated"] = True
+                        plan = act["planGenerated"].get("plan", "A plan was generated.")
+                        fmt_act["planGenerated"] = plan[:1000] + ("..." if len(plan) > 1000 else "")
                     elif "sessionCompleted" in act:
-                        fmt_act["sessionCompleted"] = True
+                        fmt_act["sessionCompleted"] = "Session completed successfully."
                     elif "sessionFailed" in act:
-                        fmt_act["sessionFailed"] = act["sessionFailed"]
+                        reason = act["sessionFailed"].get("reason", "Unknown error")
+                        fmt_act["sessionFailed"] = reason[:500] + ("..." if len(reason) > 500 else "")
 
                     formatted_activities.append(fmt_act)
 

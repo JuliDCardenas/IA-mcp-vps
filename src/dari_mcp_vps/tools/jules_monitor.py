@@ -16,6 +16,7 @@ from dari_mcp_vps.tools.jules_db import (
     record_activity_processed,
     record_activity_and_event,
     set_followup_pending,
+    update_job_activities_cursor,
 )
 
 logger = logging.getLogger(__name__)
@@ -91,7 +92,7 @@ async def background_monitor(app_config):
 
                         # Also check activities with pagination
                         all_activities = []
-                        next_page_token = None
+                        next_page_token = job.get("activities_cursor")
                         page_count = 0
 
                         while page_count < 5:  # Bounded budget per cycle
@@ -117,6 +118,8 @@ async def background_monitor(app_config):
                                 break
                             page_count += 1
 
+                        update_job_activities_cursor(db_path, job["id"], next_page_token)
+
                         new_activities_found = False
                         seen_new_terminal_activity = False
 
@@ -132,9 +135,6 @@ async def background_monitor(app_config):
 
                         job_updated_at = datetime.datetime.fromisoformat(job["updated_at"])
 
-                        # Reverse all activities to process oldest unseen first
-                        all_activities.reverse()
-
                         for activity in all_activities:
                             activity_id = activity.get("id")
                             if not activity_id or is_activity_processed(db_path, activity_id):
@@ -143,9 +143,6 @@ async def background_monitor(app_config):
                             new_activities_found = True
 
                             activity_type = activity.get("activityType", "")
-
-                            if activity_type in ("SESSION_COMPLETED", "SESSION_FAILED") or "sessionCompleted" in activity or "sessionFailed" in activity:
-                                seen_new_terminal_activity = True
 
                             # Baseline check: to avoid replaying history (e.g. from a COMPLETED task
                             # before we sent feedback), we ignore events created before the followup was requested.
@@ -160,6 +157,9 @@ async def background_monitor(app_config):
                                 elif not pending_since_dt and act_dt < job_updated_at - datetime.timedelta(minutes=5):
                                     # Just migrating old jobs, ignore old activities for notifications
                                     is_new_event = False
+
+                            if is_new_event and (activity_type in ("SESSION_COMPLETED", "SESSION_FAILED") or "sessionCompleted" in activity or "sessionFailed" in activity):
+                                seen_new_terminal_activity = True
 
                             # Determine what kind of activity it is
                             event_type = None
@@ -205,13 +205,18 @@ async def background_monitor(app_config):
                                     "context": context_msg,
                                     "activity_id": activity_id
                                 }
+
+                                # Omit remote_state from AGENT_MESSAGE to avoid confusion
+                                if event_type == "AGENT_MESSAGE":
+                                    del payload["remote_state"]
+
                                 payload = {k: v for k, v in payload.items() if v is not None}
                                 record_activity_and_event(db_path, job["id"], activity_id, event_type, payload)
                             else:
                                 record_activity_processed(db_path, job["id"], activity_id)
 
                         # If state changed, OR if it's terminal and we just processed the completion activity
-                        if remote_state != last_known_state:
+                        if remote_state != last_known_state and not seen_new_terminal_activity:
                             # We have a state transition
                             pr_url = None
                             context_msg = None

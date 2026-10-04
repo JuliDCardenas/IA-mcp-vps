@@ -53,6 +53,11 @@ def init_db(db_path: str) -> None:
         except sqlite3.OperationalError:
             pass # Column likely already exists
 
+        try:
+            cursor.execute("ALTER TABLE jules_jobs ADD COLUMN activities_cursor TEXT")
+        except sqlite3.OperationalError:
+            pass # Column likely already exists
+
         conn.commit()
 
 def get_active_jobs(db_path: str) -> list[Dict[str, Any]]:
@@ -80,16 +85,20 @@ def record_activity_processed(db_path: str, job_id: str, activity_id: str) -> No
         """, (activity_id, job_id))
         conn.commit()
 
-def set_followup_pending(db_path: str, job_id: str, is_pending: bool) -> None:
+def set_followup_pending(db_path: str, job_id: str, is_pending: bool, pending_since_iso: Optional[str] = None) -> None:
     """Set or clear the followup_pending_since flag."""
-    now = datetime.datetime.now(datetime.timezone.utc).isoformat() if is_pending else None
+    if is_pending:
+        val = pending_since_iso if pending_since_iso else datetime.datetime.now(datetime.timezone.utc).isoformat()
+    else:
+        val = None
+
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute("""
             UPDATE jules_jobs
             SET followup_pending_since = ?
             WHERE id = ?
-        """, (now, job_id))
+        """, (val, job_id))
         conn.commit()
 
 def record_event(db_path: str, job_id: str, event_type: str, payload_dict: Dict[str, Any]) -> None:
@@ -120,7 +129,8 @@ def record_activity_and_event(db_path: str, job_id: str, activity_id: str, event
             VALUES (?, ?)
         """, (activity_id, job_id))
 
-        if event_type and payload_dict is not None:
+        # Only emit event if activity was actually inserted (not ignored)
+        if cursor.rowcount > 0 and event_type and payload_dict is not None:
             event_id = str(uuid.uuid4())
             now = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
@@ -135,6 +145,17 @@ def record_activity_and_event(db_path: str, job_id: str, activity_id: str, event
                 VALUES (?, ?, ?, ?, 'PENDING', ?)
             """, (event_id, job_id, event_type, payload_str, now))
 
+        conn.commit()
+
+def update_job_activities_cursor(db_path: str, job_id: str, cursor_token: Optional[str]) -> None:
+    """Update the activities cursor for pagination."""
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE jules_jobs
+            SET activities_cursor = ?
+            WHERE id = ?
+        """, (cursor_token, job_id))
         conn.commit()
 
 def get_pending_events(db_path: str) -> list[Dict[str, Any]]:
