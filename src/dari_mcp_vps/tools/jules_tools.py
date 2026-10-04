@@ -122,7 +122,7 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
             try:
                 # Redact first, then truncate
                 full_body = e.read().decode('utf-8')
-                if app_config.jules_api_key in full_body:
+                if app_config.jules_api_key and app_config.jules_api_key in full_body:
                     full_body = full_body.replace(app_config.jules_api_key, "***REDACTED***")
                 error_body = full_body[:200]
             except Exception:
@@ -135,7 +135,7 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
             # Outcome is uncertain. Do NOT automatically retry.
             update_job_status(db_path, job_id, "DESCONOCIDO")
             full_err = str(e)
-            if app_config.jules_api_key in full_err:
+            if app_config.jules_api_key and app_config.jules_api_key in full_err:
                 full_err = full_err.replace(app_config.jules_api_key, "***REDACTED***")
             return {"error": f"Failed to contact Jules API or connection timed out: {full_err[:100]}", "task_id": job_id, "status": "DESCONOCIDO"}
 
@@ -190,7 +190,7 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
             try:
                 # Redact first, then truncate
                 full_body = e.read().decode('utf-8')
-                if app_config.jules_api_key in full_body:
+                if app_config.jules_api_key and app_config.jules_api_key in full_body:
                     full_body = full_body.replace(app_config.jules_api_key, "***REDACTED***")
                 error_body = full_body[:200]
             except Exception:
@@ -200,7 +200,7 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
             return {"error": error_msg, "task_id": task_id, "status": "ERROR"}
         except Exception as e:
             full_err = str(e)
-            if app_config.jules_api_key in full_err:
+            if app_config.jules_api_key and app_config.jules_api_key in full_err:
                 full_err = full_err.replace(app_config.jules_api_key, "***REDACTED***")
             return {"error": f"Failed to contact Jules API or connection timed out: {full_err[:100]}", "task_id": task_id, "status": "ERROR"}
 

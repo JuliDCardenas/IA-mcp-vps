@@ -98,6 +98,7 @@ def test_reply_to_task_api_error_sanitization(mock_urlopen, mcp_app):
 
     result = reply_tool(job_id, "msg")
     assert result["status"] == "ERROR"
+    assert "***REDACTED***" in result["error"]
     assert config.jules_api_key not in result["error"]
 
 @patch("urllib.request.urlopen")
