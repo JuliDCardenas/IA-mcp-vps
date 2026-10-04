@@ -85,7 +85,8 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
                     "githubRepoContext": {
                         "startingBranch": "main"
                     }
-                }
+                },
+                "automationMode": "AUTO_CREATE_PR"
             }
 
             req_sessions = urllib.request.Request(
