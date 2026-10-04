@@ -114,11 +114,9 @@ async def background_monitor(app_config):
 
                             all_activities.extend(activities_data.get("activities", []))
                             next_page_token = activities_data.get("nextPageToken")
+                            page_count += 1
                             if not next_page_token:
                                 break
-                            page_count += 1
-
-                        update_job_activities_cursor(db_path, job["id"], next_page_token)
 
                         new_activities_found = False
                         seen_new_terminal_activity = False
@@ -137,7 +135,11 @@ async def background_monitor(app_config):
 
                         for activity in all_activities:
                             activity_id = activity.get("id")
-                            if not activity_id or is_activity_processed(db_path, activity_id):
+                            if not activity_id:
+                                continue
+
+                            dedup_id = f"{session_id}::{activity_id}"
+                            if is_activity_processed(db_path, dedup_id):
                                 continue
 
                             new_activities_found = True
@@ -211,11 +213,29 @@ async def background_monitor(app_config):
                                     del payload["remote_state"]
 
                                 payload = {k: v for k, v in payload.items() if v is not None}
-                                record_activity_and_event(db_path, job["id"], activity_id, event_type, payload)
+                                record_activity_and_event(db_path, job["id"], dedup_id, event_type, payload)
                             else:
-                                record_activity_processed(db_path, job["id"], activity_id)
+                                record_activity_processed(db_path, job["id"], dedup_id)
 
                         # If state changed, OR if it's terminal and we just processed the completion activity
+                        if remote_state != last_known_state:
+                            local_status = job["status"]
+
+                            # Determine correct local status based on new remote state
+                            if remote_state in ("COMPLETED", "FAILED"):
+                                local_status = remote_state
+                            elif remote_state in ("AWAITING_PLAN_APPROVAL", "AWAITING_USER_FEEDBACK"):
+                                local_status = "ESPERANDO_FEEDBACK"
+                            else:
+                                local_status = "EN_PROGRESO"
+
+                            # If remote state changed to a non-terminal state, clear followup
+                            if followup_pending_since and remote_state not in ("COMPLETED", "FAILED", last_known_state):
+                                set_followup_pending(db_path, job["id"], False)
+                                followup_pending_since = None
+
+                            update_job_status(db_path, job["id"], local_status, remote_state)
+
                         if remote_state != last_known_state and not seen_new_terminal_activity:
                             # We have a state transition
                             pr_url = None
@@ -246,27 +266,14 @@ async def background_monitor(app_config):
                             # The event gets recorded and its event_id and timestamp are auto-generated in DB
                             record_event(db_path, job["id"], "STATE_CHANGED", payload)
 
-                            local_status = job["status"]
-
-                            # Determine correct local status based on new remote state
-                            if remote_state in ("COMPLETED", "FAILED"):
-                                local_status = remote_state
-                            elif remote_state in ("AWAITING_PLAN_APPROVAL", "AWAITING_USER_FEEDBACK"):
-                                local_status = "ESPERANDO_FEEDBACK"
-                            else:
-                                local_status = "EN_PROGRESO"
-
-                            # If remote state changed to a non-terminal state, clear followup
-                            if followup_pending_since and remote_state not in ("COMPLETED", "FAILED", last_known_state):
-                                set_followup_pending(db_path, job["id"], False)
-                                followup_pending_since = None
-
-                            update_job_status(db_path, job["id"], local_status, remote_state)
-
                         # If we saw a NEW terminal activity while tracking, clear followup
                         if followup_pending_since and seen_new_terminal_activity:
                             set_followup_pending(db_path, job["id"], False)
                             followup_pending_since = None
+
+                        # Save cursor only after durable processing is complete
+                        if page_count > 0:
+                            update_job_activities_cursor(db_path, job["id"], next_page_token)
 
                     except urllib.error.HTTPError as e:
                         # 404 means the session was deleted remotely, we should probably stop polling

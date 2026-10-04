@@ -1,6 +1,7 @@
 import json
 import urllib.error
 import urllib.request
+import urllib.parse
 from typing import Any
 
 import datetime
@@ -190,7 +191,7 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
             except Exception as e:
                 # Persistence failed but remote accepted. We must return success but inform of persistence issue.
                 return {
-                    "error": f"Message sent successfully to Jules, but failed to save local state tracking: {str(e)[:100]}",
+                    "error": "Message sent successfully to Jules, but failed to save local state tracking",
                     "task_id": task_id,
                     "jules_agent_job_id": session_id,
                     "status": "SENT",
@@ -214,6 +215,15 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
                 error_body = "Unknown body"
 
             error_msg = f"Jules API HTTP error {e.code}: {error_body}"
+
+            # Treat 5xx Server Errors as uncertain outcomes just like timeouts
+            if 500 <= e.code < 600:
+                try:
+                    set_followup_pending(db_path, task_id, True, pending_since_iso=request_start_time)
+                except Exception:
+                    pass
+                return {"error": error_msg, "task_id": task_id, "status": "DESCONOCIDO"}
+
             return {"error": error_msg, "task_id": task_id, "status": "ERROR"}
         except Exception as e:
             full_err = str(e)
@@ -277,7 +287,6 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
 
         url = f"{app_config.jules_api_url}/{session_id}/activities?pageSize={page_size}"
         if page_token:
-            import urllib.parse
             url += f"&pageToken={urllib.parse.quote(page_token)}"
 
         req = urllib.request.Request(
@@ -300,8 +309,13 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
                         msg = act["agentMessaged"].get("agentMessage", "")
                         fmt_act["agentMessage"] = msg[:1000] + ("..." if len(msg) > 1000 else "")
                     elif "planGenerated" in act:
-                        plan = act["planGenerated"].get("plan", "A plan was generated.")
-                        fmt_act["planGenerated"] = plan[:1000] + ("..." if len(plan) > 1000 else "")
+                        plan_data = act["planGenerated"].get("plan", {})
+                        if isinstance(plan_data, dict):
+                            steps = plan_data.get("steps", [])
+                            summary = f"Plan ID: {plan_data.get('id', 'Unknown')}, Steps: {len(steps)}"
+                        else:
+                            summary = str(plan_data)
+                        fmt_act["planGenerated"] = summary[:1000] + ("..." if len(summary) > 1000 else "")
                     elif "sessionCompleted" in act:
                         fmt_act["sessionCompleted"] = "Session completed successfully."
                     elif "sessionFailed" in act:

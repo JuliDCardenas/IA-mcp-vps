@@ -65,7 +65,7 @@ def get_active_jobs(db_path: str) -> list[Dict[str, Any]]:
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM jules_jobs WHERE (status IN ('EN_PROGRESO', 'PENDIENTE', 'ESPERANDO_FEEDBACK') OR followup_pending_since IS NOT NULL) AND jules_agent_job_id IS NOT NULL")
+        cursor.execute("SELECT * FROM jules_jobs WHERE (status IN ('EN_PROGRESO', 'PENDIENTE', 'ESPERANDO_FEEDBACK') OR followup_pending_since IS NOT NULL OR activities_cursor IS NOT NULL) AND jules_agent_job_id IS NOT NULL")
         return [dict(row) for row in cursor.fetchall()]
 
 def is_activity_processed(db_path: str, activity_id: str) -> bool:
