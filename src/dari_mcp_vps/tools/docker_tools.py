@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import json
@@ -112,7 +113,7 @@ def _demux_docker_logs(raw: bytes) -> str:
 
 
 def register_docker_tools(mcp: Any, app_config: Any) -> None:
-    @mcp.tool(tags=["vps"])
+    @mcp.tool(tags=["vps"], annotations={"readOnlyHint": True})
     def docker_ps() -> list[dict[str, Any]]:
         """List Docker containers via Docker socket; no docker CLI required."""
         containers = _json("GET", "/containers/json?all=1")
@@ -128,7 +129,7 @@ def register_docker_tools(mcp: Any, app_config: Any) -> None:
             for c in containers
         ]
 
-    @mcp.tool(tags=["vps"])
+    @mcp.tool(tags=["vps"], annotations={"readOnlyHint": True})
     def container_inspect(container: str) -> dict[str, Any]:
         """Inspect an allowed container and return safe operational metadata."""
         assert_allowed_name(app_config.raw, "allowed_containers", container)
@@ -172,7 +173,7 @@ def register_docker_tools(mcp: Any, app_config: Any) -> None:
             "restart_policy": host_config.get("RestartPolicy"),
         }
 
-    @mcp.tool(tags=["vps"])
+    @mcp.tool(tags=["vps"], annotations={"readOnlyHint": True})
     def docker_logs(container: str, lines: int = 100) -> str:
         """Return recent logs for an allowed Docker container."""
         assert_allowed_name(app_config.raw, "allowed_containers", container)
@@ -185,7 +186,7 @@ def register_docker_tools(mcp: Any, app_config: Any) -> None:
             raise RuntimeError(body.decode("utf-8", errors="replace"))
         return _demux_docker_logs(body)
 
-    @mcp.tool(tags=["vps"])
+    @mcp.tool(tags=["vps"], annotations={"readOnlyHint": True})
     def docker_logs_filtered(
         container: str,
         lines: int = 200,
@@ -216,7 +217,7 @@ def register_docker_tools(mcp: Any, app_config: Any) -> None:
             text = "\n".join(lines_out)
         return text[:20000]
 
-    @mcp.tool(tags=["vps"])
+    @mcp.tool(tags=["vps"], annotations={"readOnlyHint": False})
     def docker_restart(container: str) -> str:
         """Restart an allowed Docker container."""
         assert_allowed_name(app_config.raw, "allowed_containers", container)

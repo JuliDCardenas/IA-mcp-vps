@@ -2,7 +2,7 @@ import json, yaml
 from dari_mcp_vps.security import resolve_allowed_path
 
 def register_validator_tools(mcp, app_config):
-    @mcp.tool(tags=["repositorios_archivos"])
+    @mcp.tool(tags=["repositorios_archivos"], annotations={"readOnlyHint": True})
     def validate_yaml(scope: str, path: str):
         """Validate YAML."""
         target = resolve_allowed_path(app_config.raw, scope, path)
@@ -12,7 +12,7 @@ def register_validator_tools(mcp, app_config):
         except Exception as exc:
             return {'ok': False, 'error': str(exc)}
 
-    @mcp.tool(tags=["repositorios_archivos"])
+    @mcp.tool(tags=["repositorios_archivos"], annotations={"readOnlyHint": True})
     def validate_json(scope: str, path: str):
         """Validate JSON."""
         target = resolve_allowed_path(app_config.raw, scope, path)

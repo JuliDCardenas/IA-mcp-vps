@@ -21,7 +21,7 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
                 raise RuntimeError(f"Failed to initialize Jules database: {e}")
         return db_path
 
-    @mcp.tool(tags=["jules"])
+    @mcp.tool(tags=["jules"], annotations={"readOnlyHint": False})
     def jules_request_coding_task(repo_name: str, task_description: str) -> dict[str, Any]:
         """Create a Jules coding session for a given repository and task."""
         if not app_config.jules_api_key:
@@ -139,7 +139,7 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
                 full_err = full_err.replace(app_config.jules_api_key, "***REDACTED***")
             return {"error": f"Failed to contact Jules API or connection timed out: {full_err[:100]}", "task_id": job_id, "status": "DESCONOCIDO"}
 
-    @mcp.tool(tags=["jules"])
+    @mcp.tool(tags=["jules"], annotations={"readOnlyHint": False})
     def jules_reply_to_task(task_id: str, message: str) -> dict[str, Any]:
         """Send a follow-up message to an existing Jules session."""
         if not app_config.jules_api_key:
@@ -204,7 +204,7 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
                 full_err = full_err.replace(app_config.jules_api_key, "***REDACTED***")
             return {"error": f"Failed to contact Jules API or connection timed out: {full_err[:100]}", "task_id": task_id, "status": "ERROR"}
 
-    @mcp.tool(tags=["jules"])
+    @mcp.tool(tags=["jules"], annotations={"readOnlyHint": True})
     def jules_check_task_status(task_id: str) -> dict[str, Any]:
         """Check the status of a previously requested Jules coding task."""
         try:

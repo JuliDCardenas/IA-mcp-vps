@@ -22,7 +22,7 @@ def _run_git(repo: Path, args: list[str]) -> str:
 
 
 def register_git_tools(mcp: Any, app_config: Any) -> None:
-    @mcp.tool(tags=["repositorios_archivos"])
+    @mcp.tool(tags=["repositorios_archivos"], annotations={"readOnlyHint": True})
     def git_status(scope: str, path: str = ".") -> dict[str, Any]:
         """Return read-only git status for an allowlisted repository path."""
         repo = resolve_allowed_path(app_config.raw, scope, path)
