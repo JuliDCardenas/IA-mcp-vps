@@ -159,3 +159,65 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
             "created_at": job["created_at"],
             "updated_at": job["updated_at"]
         }
+
+    @mcp.tool()
+    def jules_reply_to_task(task_id: str, message: str) -> dict[str, Any]:
+        """Send a follow-up message to an existing Jules session."""
+        if not app_config.jules_api_key:
+            return {"error": "JULES_API_KEY is not configured", "status": "ERROR"}
+
+        if not message or not message.strip():
+            return {"error": "message cannot be empty", "status": "ERROR"}
+
+        try:
+            db_path = _get_db()
+        except RuntimeError as e:
+            return {"error": str(e), "status": "ERROR"}
+
+        job = get_job(db_path, task_id)
+        if not job:
+            return {"error": f"Task ID {task_id} not found", "status": "NOT_FOUND"}
+
+        session_id = job.get("jules_agent_job_id")
+        if not session_id:
+            return {"error": f"Task ID {task_id} does not have a remote session ID", "status": "ERROR"}
+
+        # We do not restrict this by local status (e.g. COMPLETED)
+        # Let the API determine if it accepts the message.
+        reply_url = f"{app_config.jules_api_url}/{session_id}:sendMessage"
+        payload = {"prompt": message}
+
+        req = urllib.request.Request(
+            reply_url,
+            method="POST",
+            headers={
+                "X-Goog-Api-Key": app_config.jules_api_key,
+                "Content-Type": "application/json"
+            },
+            data=json.dumps(payload).encode("utf-8")
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                # Discard response body but ensure it was successful
+                resp.read()
+                return {
+                    "task_id": task_id,
+                    "jules_agent_job_id": session_id,
+                    "status": "SENT",
+                    "message": "Message successfully sent to the remote session."
+                }
+        except urllib.error.HTTPError as e:
+            try:
+                error_body = e.read().decode('utf-8')[:200]
+            except Exception:
+                error_body = "Unknown body"
+
+            error_msg = f"Jules API HTTP error {e.code}: {error_body}"
+            # Sanitize token if leaked in response
+            if app_config.jules_api_key in error_msg:
+                error_msg = error_msg.replace(app_config.jules_api_key, "***REDACTED***")
+
+            return {"error": error_msg, "task_id": task_id, "status": "ERROR"}
+        except Exception as e:
+            return {"error": f"Failed to contact Jules API or connection timed out: {str(e)[:100]}", "task_id": task_id, "status": "ERROR"}
