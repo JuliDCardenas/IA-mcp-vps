@@ -428,7 +428,7 @@ class TestConsolidatedOrchestrator(unittest.TestCase):
             def __init__(self):
                 self.tools = []
 
-            def tool(self):
+            def tool(self, **kwargs):
                 def decorator(fn):
                     self.tools.append(fn.__name__)
                     return fn
@@ -1132,7 +1132,7 @@ class TestConsolidatedOrchestrator(unittest.TestCase):
         class MockMCP:
             def __init__(self):
                 self.tools = {}
-            def tool(self):
+            def tool(self, **kwargs):
                 def dec(fn):
                     self.tools[fn.__name__] = fn
                     return fn
@@ -1361,7 +1361,7 @@ class TestConsolidatedOrchestrator(unittest.TestCase):
         class MockMCP:
             def __init__(self):
                 self.tools = {}
-            def tool(self):
+            def tool(self, **kwargs):
                 def dec(fn):
                     self.tools[fn.__name__] = fn
                     return fn
@@ -1424,7 +1424,7 @@ class TestConsolidatedOrchestrator(unittest.TestCase):
         class MockMCP:
             def __init__(self):
                 self.tools = {}
-            def tool(self):
+            def tool(self, **kwargs):
                 def dec(fn):
                     self.tools[fn.__name__] = fn
                     return fn
