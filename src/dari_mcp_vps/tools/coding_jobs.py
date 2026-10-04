@@ -286,7 +286,7 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
             return asdict(job)
         return _read_json(job_id, "job.json")
 
-    @mcp.tool()
+    @mcp.tool(tags=["agy"])
     def coding_repository_list(
         installation_id: int,
         page: int = 1,
@@ -316,7 +316,7 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
             "has_next_page": result.has_next_page,
         }
 
-    @mcp.tool()
+    @mcp.tool(tags=["agy"])
     def coding_job_create(
         repository: str,
         task_type: str,
@@ -405,12 +405,12 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
         _exec([TASK_SCRIPTS[task_type], job_id, encoded], detach=True)
         return {"job_id": job_id, "status": "CREATED", "repository": repository, "task_type": task_type}
 
-    @mcp.tool()
+    @mcp.tool(tags=["agy"])
     def coding_job_status(job_id: str) -> dict[str, Any]:
         """Return the current state and timestamps for an Agy coding job."""
         return status_payload(job_id)
 
-    @mcp.tool()
+    @mcp.tool(tags=["agy"])
     def coding_job_wait(job_id: str, timeout_seconds: int = 90, poll_seconds: int = 2) -> dict[str, Any]:
         """Wait a bounded time for a coding job to reach a terminal state."""
         timeout_seconds = min(max(int(timeout_seconds), 1), 120)
@@ -422,7 +422,7 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
             status = status_payload(job_id)
         return {**status, "wait_timed_out": status.get("status") not in TERMINAL_STATES}
 
-    @mcp.tool()
+    @mcp.tool(tags=["agy"])
     def coding_job_result(job_id: str) -> dict[str, Any]:
         """Return the bounded structured result or sanitized failure diagnostics."""
         if is_persistent_job(job_id):
@@ -471,7 +471,7 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
             "diagnostic": diagnostic,
         }
 
-    @mcp.tool()
+    @mcp.tool(tags=["agy"])
     def coding_job_changes(job_id: str) -> dict[str, Any]:
         """Return the validated changed-file manifest for an implementation job."""
         if is_persistent_job(job_id):
@@ -487,7 +487,7 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
         manifest = _read_json(job_id, "manifest.json")
         return {"job_id": job_id, **manifest}
 
-    @mcp.tool()
+    @mcp.tool(tags=["agy"])
     def coding_job_artifact(job_id: str, path: str) -> dict[str, Any]:
         """Return one validated changed text file from an isolated implementation job."""
         clean_path = _validate_artifact_path(path)
@@ -511,7 +511,7 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
         content = _exec(["/opt/agy-job/read-artifact.sh", job_id, encoded], detach=False)
         return {"job_id": job_id, "path": clean_path, "content": content}
 
-    @mcp.tool()
+    @mcp.tool(tags=["agy"])
     def coding_job_request_revision(job_id: str, feedback: str) -> dict[str, Any]:
         """Request an implementation revision with bounded feedback (max 3 cycles)."""
         mgr = _get_mgr()
@@ -522,14 +522,14 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
             job = mgr.get_job(job_id)
         return asdict(job)
 
-    @mcp.tool()
+    @mcp.tool(tags=["agy"])
     def coding_job_validate_only(job_id: str) -> dict[str, Any]:
         """Run deterministic validation for an existing persistent job without Agy."""
         _validate_job_id(job_id)
         report = _get_mgr().validate_only(job_id)
         return asdict(report)
 
-    @mcp.tool()
+    @mcp.tool(tags=["agy"])
     def coding_job_apply_mechanical_operation(
         job_id: str,
         operation: str,
@@ -551,7 +551,7 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
             "validation": asdict(report) if report is not None else None,
         }
 
-    @mcp.tool()
+    @mcp.tool(tags=["agy"])
     def coding_job_approve_changes(
         job_id: str,
         expected_validation_hash: str,
@@ -565,13 +565,13 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
         )
         return asdict(job)
 
-    @mcp.tool()
+    @mcp.tool(tags=["agy"])
     def coding_job_publish_branch(job_id: str) -> dict[str, Any]:
         """Publish the approved feature branch via the isolated promoter boundary."""
         job = _get_mgr().publish_branch(job_id=job_id)
         return asdict(job)
 
-    @mcp.tool()
+    @mcp.tool(tags=["agy"])
     def coding_job_create_pull_request(
         job_id: str,
         title: str | None = None,
@@ -581,7 +581,7 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
         job = _get_mgr().create_pull_request(job_id=job_id, title=title, body=body)
         return asdict(job)
 
-    @mcp.tool()
+    @mcp.tool(tags=["agy"])
     def coding_job_cancel(job_id: str, reason: str | None = None) -> dict[str, Any]:
         """Cancel an active coding job idempotently without deleting the worktree."""
         if is_persistent_job(job_id):
@@ -589,7 +589,7 @@ def register_coding_job_tools(mcp: Any, app_config: Any) -> None:
             return asdict(job)
         return {"job_id": job_id, "status": "CANCELLED", "reason": reason}
 
-    @mcp.tool()
+    @mcp.tool(tags=["agy"])
     def coding_job_cleanup(job_id: str, confirm_discard_unpublished: bool = False) -> dict[str, Any]:
         """Clean up the assigned persistent worktree safely, preserving base repository."""
         if is_persistent_job(job_id):

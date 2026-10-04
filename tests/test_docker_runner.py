@@ -432,7 +432,7 @@ class TestDockerRunner(unittest.TestCase):
             def __init__(self) -> None:
                 self.tools: dict[str, Any] = {}
 
-            def tool(self) -> Any:
+            def tool(self, **kwargs) -> Any:
                 def decorator(fn: Any) -> Any:
                     self.tools[fn.__name__] = fn
                     return fn

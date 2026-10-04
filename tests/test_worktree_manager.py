@@ -194,7 +194,7 @@ class TestWorktreeManager(unittest.TestCase):
             def __init__(self):
                 self.tools = []
 
-            def tool(self):
+            def tool(self, **kwargs):
                 def decorator(fn):
                     self.tools.append(fn.__name__)
                     return fn

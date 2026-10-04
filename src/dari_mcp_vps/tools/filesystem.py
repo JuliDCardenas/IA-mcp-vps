@@ -17,7 +17,7 @@ def _count_lines(path):
     return count
 
 def register_filesystem_tools(mcp, app_config):
-    @mcp.tool()
+    @mcp.tool(tags=["repositorios_archivos"])
     def list_files(scope: str, path: str = '.'):
         """List non-sensitive files inside an allowed scope."""
         base = resolve_allowed_path(app_config.raw, scope, path)
@@ -32,7 +32,7 @@ def register_filesystem_tools(mcp, app_config):
             items.append({'name': child.name, 'is_dir': child.is_dir(), 'size': child.stat().st_size})
         return items
 
-    @mcp.tool()
+    @mcp.tool(tags=["repositorios_archivos"])
     def file_info(scope: str, path: str, count_lines: bool = True):
         """Return metadata for a file in an allowed scope, including optional line count for logs."""
         target = resolve_allowed_path(app_config.raw, scope, path)
@@ -53,7 +53,7 @@ def register_filesystem_tools(mcp, app_config):
             result['line_count'] = _count_lines(target)
         return result
 
-    @mcp.tool()
+    @mcp.tool(tags=["repositorios_archivos"])
     def read_file(scope: str, path: str):
         """Read a UTF-8 file inside an allowed scope, size-limited."""
         target = resolve_allowed_path(app_config.raw, scope, path)
@@ -62,7 +62,7 @@ def register_filesystem_tools(mcp, app_config):
             raise FileNotFoundError(str(target))
         return _read_limited(target, app_config.max_file_bytes)
 
-    @mcp.tool()
+    @mcp.tool(tags=["repositorios_archivos"])
     def read_file_range(scope: str, path: str, start_line: int, end_line: int):
         """Read a line range from large UTF-8 files without loading the full file."""
         target = resolve_allowed_path(app_config.raw, scope, path)
@@ -83,7 +83,7 @@ def register_filesystem_tools(mcp, app_config):
                 out.append(f'{idx}: {line.rstrip()}')
         return '\n'.join(out)
 
-    @mcp.tool()
+    @mcp.tool(tags=["repositorios_archivos"])
     def tail_file(scope: str, path: str, lines: int = 100):
         """Return the last N lines from a UTF-8 file in an allowed scope."""
         target = resolve_allowed_path(app_config.raw, scope, path)
@@ -97,7 +97,7 @@ def register_filesystem_tools(mcp, app_config):
                 buf.append((idx, line.rstrip()))
         return '\n'.join(f'{idx}: {line}' for idx, line in buf)
 
-    @mcp.tool()
+    @mcp.tool(tags=["repositorios_archivos"])
     def search_text(scope: str, query: str, path: str = '.'):
         """Search text in an allowed scope using ripgrep."""
         root = resolve_allowed_path(app_config.raw, scope, path)

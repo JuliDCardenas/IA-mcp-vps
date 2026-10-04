@@ -67,6 +67,19 @@ El orquestador incluye soporte parcial asíncrono para delegar tareas al agente 
 
 Las herramientas disponibles son `jules_request_coding_task` y `jules_check_task_status`.
 
+## Categorías de Herramientas MCP (Tags)
+
+El servidor organiza sus herramientas en cuatro grupos principales para facilitar su descubrimiento y uso:
+
+- **vps**: Diagnóstico, puertos, Docker, Compose, logs, comprobaciones HTTP.
+  - *Herramientas:* `system_status`, `check_ports`, `docker_ps`, `container_inspect`, `docker_logs`, `docker_logs_filtered`, `docker_restart`, `docker_compose_config`, `docker_compose_ps`, `docker_compose_logs`, `http_probe`.
+- **repositorios_archivos**: Operaciones con el sistema de archivos local, validación de formatos y estado Git de solo lectura.
+  - *Herramientas:* `list_files`, `file_info`, `read_file`, `read_file_range`, `tail_file`, `search_text`, `validate_yaml`, `validate_json`, `git_status`.
+- **agy**: Ciclo de vida completo de los trabajos de código aislados (Antigravity).
+  - *Herramientas:* `coding_repository_list`, `coding_job_create`, `coding_job_status`, `coding_job_wait`, `coding_job_result`, `coding_job_changes`, `coding_job_artifact`, `coding_job_request_revision`, `coding_job_validate_only`, `coding_job_apply_mechanical_operation`, `coding_job_approve_changes`, `coding_job_publish_branch`, `coding_job_create_pull_request`, `coding_job_cancel`, `coding_job_cleanup`, `coding_private_job_create`.
+- **jules**: Integración con el orquestador Jules.
+  - *Herramientas:* `jules_request_coding_task`, `jules_reply_to_task`, `jules_check_task_status`.
+
 ## Transporte remoto
 
 FastMCP corre por HTTP en el puerto interno `8787`. Docker publica únicamente:
