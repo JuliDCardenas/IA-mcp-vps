@@ -85,19 +85,39 @@ def test_reply_to_task_not_found(mcp_app):
     assert result["status"] == "NOT_FOUND"
 
 @patch("urllib.request.urlopen")
-def test_reply_to_task_api_error(mock_urlopen, mcp_app):
+def test_reply_to_task_api_error_sanitization(mock_urlopen, mcp_app):
     tools, config = mcp_app
     reply_tool = tools["jules_reply_to_task"]
 
     job_id = create_job(config.jules_db_path, "repo", "task")
     update_job_remote_id(config.jules_db_path, job_id, "sessions/123")
 
-    error_body = f"Error with key {config.jules_api_key}".encode("utf-8")
+    # Simulate a generic network exception that leaks credentials
+    generic_error = Exception(f"Connection dropped leaking {config.jules_api_key}")
+    mock_urlopen.side_effect = generic_error
+
+    result = reply_tool(job_id, "msg")
+    assert result["status"] == "ERROR"
+    assert config.jules_api_key not in result["error"]
+
+@patch("urllib.request.urlopen")
+def test_reply_to_task_api_error_truncation(mock_urlopen, mcp_app):
+    tools, config = mcp_app
+    reply_tool = tools["jules_reply_to_task"]
+
+    job_id = create_job(config.jules_db_path, "repo", "task")
+    update_job_remote_id(config.jules_db_path, job_id, "sessions/123")
+
+    # Verify that the key is redacted even if the original error is longer than the truncation limit
+    long_prefix = "A" * 195
+    error_body = f"{long_prefix} {config.jules_api_key} trailing data".encode("utf-8")
+
     error = urllib.error.HTTPError("url", 400, "Bad Request", {}, None)
     error.read = MagicMock(return_value=error_body)
     mock_urlopen.side_effect = error
 
     result = reply_tool(job_id, "msg")
     assert result["status"] == "ERROR"
-    assert "***REDACTED***" in result["error"]
     assert config.jules_api_key not in result["error"]
+    # Check that it did truncate correctly and redacted the part it could
+    assert len(result["error"]) <= 250 # 200 body + prefix

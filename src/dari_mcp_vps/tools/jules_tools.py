@@ -120,45 +120,24 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
             # Confirmed failure from API
             update_job_status(db_path, job_id, "FALLIDO")
             try:
-                error_body = e.read().decode('utf-8')[:200]
+                # Redact first, then truncate
+                full_body = e.read().decode('utf-8')
+                if app_config.jules_api_key in full_body:
+                    full_body = full_body.replace(app_config.jules_api_key, "***REDACTED***")
+                error_body = full_body[:200]
             except Exception:
                 error_body = "Unknown body"
 
             error_msg = f"Jules API HTTP error {e.code}: {error_body}"
-            # Sanitize token if leaked in response
-            if app_config.jules_api_key in error_msg:
-                error_msg = error_msg.replace(app_config.jules_api_key, "***REDACTED***")
-
             return {"error": error_msg, "task_id": job_id, "status": "FALLIDO"}
         except Exception as e:
             # Timeout or other network error AFTER we potentially sent the request.
             # Outcome is uncertain. Do NOT automatically retry.
             update_job_status(db_path, job_id, "DESCONOCIDO")
-            return {"error": f"Failed to contact Jules API or connection timed out: {str(e)[:100]}", "task_id": job_id, "status": "DESCONOCIDO"}
-
-    @mcp.tool()
-    def jules_check_task_status(task_id: str) -> dict[str, Any]:
-        """Check the status of a previously requested Jules coding task."""
-        try:
-            db_path = _get_db()
-        except RuntimeError as e:
-            return {"error": str(e), "status": "ERROR"}
-
-        job = get_job(db_path, task_id)
-        if not job:
-            return {"error": f"Task ID {task_id} not found", "status": "NOT_FOUND"}
-
-        return {
-            "is_local_cache": True,
-            "task_id": job["id"],
-            "repo_name": job["repo_name"],
-            "task_description": job["task_description"],
-            "jules_agent_job_id": job["jules_agent_job_id"],
-            "status": job["status"],
-            "remote_state": job.get("remote_state"),
-            "created_at": job["created_at"],
-            "updated_at": job["updated_at"]
-        }
+            full_err = str(e)
+            if app_config.jules_api_key in full_err:
+                full_err = full_err.replace(app_config.jules_api_key, "***REDACTED***")
+            return {"error": f"Failed to contact Jules API or connection timed out: {full_err[:100]}", "task_id": job_id, "status": "DESCONOCIDO"}
 
     @mcp.tool()
     def jules_reply_to_task(task_id: str, message: str) -> dict[str, Any]:
@@ -209,15 +188,42 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
                 }
         except urllib.error.HTTPError as e:
             try:
-                error_body = e.read().decode('utf-8')[:200]
+                # Redact first, then truncate
+                full_body = e.read().decode('utf-8')
+                if app_config.jules_api_key in full_body:
+                    full_body = full_body.replace(app_config.jules_api_key, "***REDACTED***")
+                error_body = full_body[:200]
             except Exception:
                 error_body = "Unknown body"
 
             error_msg = f"Jules API HTTP error {e.code}: {error_body}"
-            # Sanitize token if leaked in response
-            if app_config.jules_api_key in error_msg:
-                error_msg = error_msg.replace(app_config.jules_api_key, "***REDACTED***")
-
             return {"error": error_msg, "task_id": task_id, "status": "ERROR"}
         except Exception as e:
-            return {"error": f"Failed to contact Jules API or connection timed out: {str(e)[:100]}", "task_id": task_id, "status": "ERROR"}
+            full_err = str(e)
+            if app_config.jules_api_key in full_err:
+                full_err = full_err.replace(app_config.jules_api_key, "***REDACTED***")
+            return {"error": f"Failed to contact Jules API or connection timed out: {full_err[:100]}", "task_id": task_id, "status": "ERROR"}
+
+    @mcp.tool()
+    def jules_check_task_status(task_id: str) -> dict[str, Any]:
+        """Check the status of a previously requested Jules coding task."""
+        try:
+            db_path = _get_db()
+        except RuntimeError as e:
+            return {"error": str(e), "status": "ERROR"}
+
+        job = get_job(db_path, task_id)
+        if not job:
+            return {"error": f"Task ID {task_id} not found", "status": "NOT_FOUND"}
+
+        return {
+            "is_local_cache": True,
+            "task_id": job["id"],
+            "repo_name": job["repo_name"],
+            "task_description": job["task_description"],
+            "jules_agent_job_id": job["jules_agent_job_id"],
+            "status": job["status"],
+            "remote_state": job.get("remote_state"),
+            "created_at": job["created_at"],
+            "updated_at": job["updated_at"]
+        }
