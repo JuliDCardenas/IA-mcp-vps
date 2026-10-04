@@ -141,20 +141,39 @@ def test_request_coding_task_success(mock_urlopen, mcp_app):
 
 
 @patch("urllib.request.urlopen")
-def test_request_coding_task_api_error_and_sanitization(mock_urlopen, mcp_app):
+def test_request_coding_task_get_sources_timeout(mock_urlopen, mcp_app):
     tools, config = mcp_app
     jules_request_coding_task = tools["jules_request_coding_task"]
 
-    # First fetch succeeds to resolve source
+    import urllib.error
+    timeout_err = urllib.error.URLError("Connection timed out")
+
+    mock_urlopen.side_effect = timeout_err
+
+    result = jules_request_coding_task("my-repo", "Refactor module X")
+
+    # A failure BEFORE POST is FALLIDO (no uncertain outcome)
+    assert result["status"] == "FALLIDO"
+    assert "Failed to fetch sources" in result["error"]
+
+    with sqlite3.connect(config.jules_db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT status FROM jules_jobs WHERE id = ?", (result["task_id"],))
+        row = cursor.fetchone()
+        assert row[0] == "FALLIDO"
+
+
+@patch("urllib.request.urlopen")
+def test_request_coding_task_post_401(mock_urlopen, mcp_app):
+    tools, config = mcp_app
+    jules_request_coding_task = tools["jules_request_coding_task"]
+
     mock_sources_resp = MagicMock()
     mock_sources_resp.read.return_value = json.dumps({
         "sources": [{"name": "sources/github/owner/my-repo", "id": "github/owner/my-repo"}]
     }).encode("utf-8")
 
-    # Mock HTTP error on the POST call leaking API key
-    error_body = f"Server crashed with key {config.jules_api_key}".encode("utf-8")
     error = urllib.error.HTTPError("url", 401, "Unauthorized", {}, None)
-    error.read = MagicMock(return_value=error_body)
 
     mock_urlopen.side_effect = [
         MagicMock(__enter__=lambda _: mock_sources_resp, __exit__=lambda *a: None),
@@ -164,49 +183,112 @@ def test_request_coding_task_api_error_and_sanitization(mock_urlopen, mcp_app):
     result = jules_request_coding_task("my-repo", "Refactor module X")
 
     assert result["status"] == "FALLIDO"
-    assert "task_id" in result
     assert "HTTP error 401" in result["error"]
-    assert "***REDACTED***" in result["error"]
     assert config.jules_api_key not in result["error"]
 
-    # Verify DB state is FALLIDO for confirmed API errors
     with sqlite3.connect(config.jules_db_path) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT status FROM jules_jobs WHERE id = ?", (result["task_id"],))
         row = cursor.fetchone()
         assert row[0] == "FALLIDO"
 
+
 @patch("urllib.request.urlopen")
-def test_request_coding_task_uncertain_outcome(mock_urlopen, mcp_app):
+def test_request_coding_task_post_500(mock_urlopen, mcp_app):
     tools, config = mcp_app
     jules_request_coding_task = tools["jules_request_coding_task"]
 
-    # First fetch succeeds to resolve source
     mock_sources_resp = MagicMock()
     mock_sources_resp.read.return_value = json.dumps({
         "sources": [{"name": "sources/github/owner/my-repo", "id": "github/owner/my-repo"}]
     }).encode("utf-8")
 
-    # Mock a timeout error on the POST call
-    import urllib.error
-    timeout_err = urllib.error.URLError("Connection timed out")
+    error = urllib.error.HTTPError("url", 500, "Internal Server Error", {}, None)
 
     mock_urlopen.side_effect = [
         MagicMock(__enter__=lambda _: mock_sources_resp, __exit__=lambda *a: None),
-        timeout_err
+        error
     ]
 
     result = jules_request_coding_task("my-repo", "Refactor module X")
 
     assert result["status"] == "DESCONOCIDO"
-    assert "Connection timed out" in result["error"]
+    assert "ambiguous HTTP error 500" in result["error"]
 
-    # Verify DB state is DESCONOCIDO for uncertain outcomes
     with sqlite3.connect(config.jules_db_path) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT status FROM jules_jobs WHERE id = ?", (result["task_id"],))
         row = cursor.fetchone()
         assert row[0] == "DESCONOCIDO"
+
+
+@patch("urllib.request.urlopen")
+def test_request_coding_task_post_timeout_and_sanitization(mock_urlopen, mcp_app):
+    tools, config = mcp_app
+    jules_request_coding_task = tools["jules_request_coding_task"]
+
+    mock_sources_resp = MagicMock()
+    mock_sources_resp.read.return_value = json.dumps({
+        "sources": [{"name": "sources/github/owner/my-repo", "id": "github/owner/my-repo"}]
+    }).encode("utf-8")
+
+    # Mock generic exception that crosses the truncation boundary (100 characters)
+    long_error_msg = f"Exception with {config.jules_api_key} and some very long text " * 10
+    generic_err = Exception(long_error_msg)
+
+    mock_urlopen.side_effect = [
+        MagicMock(__enter__=lambda _: mock_sources_resp, __exit__=lambda *a: None),
+        generic_err
+    ]
+
+    result = jules_request_coding_task("my-repo", "Refactor module X")
+
+    assert result["status"] == "DESCONOCIDO"
+    assert "Failed to contact Jules API or connection timed out" in result["error"]
+    # Verify key was redacted
+    assert "***REDACTED***" in result["error"]
+    assert config.jules_api_key not in result["error"]
+
+    with sqlite3.connect(config.jules_db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT status FROM jules_jobs WHERE id = ?", (result["task_id"],))
+        row = cursor.fetchone()
+        assert row[0] == "DESCONOCIDO"
+
+
+@patch("urllib.request.urlopen")
+def test_request_coding_task_database_save_failure(mock_urlopen, mcp_app):
+    tools, config = mcp_app
+    jules_request_coding_task = tools["jules_request_coding_task"]
+
+    mock_sources_resp = MagicMock()
+    mock_sources_resp.read.return_value = json.dumps({
+        "sources": [{"name": "sources/github/owner/my-repo", "id": "github/owner/my-repo"}]
+    }).encode("utf-8")
+
+    mock_sessions_resp = MagicMock()
+    mock_sessions_resp.read.return_value = json.dumps({
+        "name": "sessions/12345",
+        "state": "QUEUED"
+    }).encode("utf-8")
+
+    mock_urlopen.side_effect = [
+        MagicMock(__enter__=lambda _: mock_sources_resp, __exit__=lambda *a: None),
+        MagicMock(__enter__=lambda _: mock_sessions_resp, __exit__=lambda *a: None)
+    ]
+
+    # Mock database to fail on UPDATE
+    with patch("dari_mcp_vps.tools.jules_tools.update_job_remote_id") as mock_update:
+        mock_update.side_effect = Exception("Mock DB Failure")
+
+        result = jules_request_coding_task("my-repo", "Refactor module X")
+
+        # It must report error but preserve the identity!
+        assert result["status"] == "ERROR"
+        assert "jules_agent_job_id" in result
+        assert result["jules_agent_job_id"] == "sessions/12345"
+        assert "task_id" in result
+        assert "Session submitted but failed to record locally" in result["error"]
 
 @patch("urllib.request.urlopen")
 def test_ambiguous_repo_resolution(mock_urlopen, mcp_app):

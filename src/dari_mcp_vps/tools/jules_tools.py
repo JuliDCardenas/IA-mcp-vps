@@ -38,11 +38,11 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
 
         job_id = create_job(db_path, repo_name, task_description)
 
-        try:
-            # First, fetch sources to resolve the repo_name to a source name with pagination
-            next_page_token = None
-            matched_sources = []
+        # Phase 1: Fetch sources to resolve the repo_name to a source name with pagination
+        next_page_token = None
+        matched_sources = []
 
+        try:
             while True:
                 sources_url = f"{app_config.jules_api_url}/sources"
                 if next_page_token:
@@ -66,44 +66,63 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
                     next_page_token = sources_data.get("nextPageToken")
                     if not next_page_token:
                         break
+        except urllib.error.HTTPError as e:
+            update_job_status(db_path, job_id, "FALLIDO")
+            # We don't read error_body for public errors
+            return {"error": f"Jules API rejected GET /sources request with HTTP error {e.code}", "task_id": job_id, "status": "FALLIDO"}
+        except Exception as e:
+            # Before POST, any failure means it was not submitted
+            update_job_status(db_path, job_id, "FALLIDO")
+            return {"error": "Failed to fetch sources from Jules API before submission", "task_id": job_id, "status": "FALLIDO"}
 
-            if not matched_sources:
-                update_job_status(db_path, job_id, "FALLIDO")
-                return {"error": f"Repository '{repo_name}' not found in Jules sources.", "task_id": job_id, "status": "FALLIDO"}
-            elif len(matched_sources) > 1:
-                update_job_status(db_path, job_id, "FALLIDO")
-                return {"error": f"Repository '{repo_name}' matches multiple sources ({', '.join(matched_sources)}). Please use canonical owner/repo name.", "task_id": job_id, "status": "FALLIDO"}
+        if not matched_sources:
+            update_job_status(db_path, job_id, "FALLIDO")
+            return {"error": f"Repository '{repo_name}' not found in Jules sources.", "task_id": job_id, "status": "FALLIDO"}
+        elif len(matched_sources) > 1:
+            update_job_status(db_path, job_id, "FALLIDO")
+            return {"error": f"Repository '{repo_name}' matches multiple sources ({', '.join(matched_sources)}). Please use canonical owner/repo name.", "task_id": job_id, "status": "FALLIDO"}
 
-            source_name = matched_sources[0]
+        source_name = matched_sources[0]
 
-            # Now, create the session
-            sessions_url = f"{app_config.jules_api_url}/sessions"
-            payload = {
-                "prompt": task_description,
-                "sourceContext": {
-                    "source": source_name,
-                    "githubRepoContext": {
-                        "startingBranch": "main"
-                    }
+        # Phase 2: Create the session
+        sessions_url = f"{app_config.jules_api_url}/sessions"
+        payload = {
+            "prompt": task_description,
+            "sourceContext": {
+                "source": source_name,
+                "githubRepoContext": {
+                    "startingBranch": "main"
                 }
             }
+        }
 
-            req_sessions = urllib.request.Request(
-                sessions_url,
-                method="POST",
-                headers={
-                    "X-Goog-Api-Key": app_config.jules_api_key,
-                    "Content-Type": "application/json"
-                },
-                data=json.dumps(payload).encode("utf-8")
-            )
+        req_sessions = urllib.request.Request(
+            sessions_url,
+            method="POST",
+            headers={
+                "X-Goog-Api-Key": app_config.jules_api_key,
+                "Content-Type": "application/json"
+            },
+            data=json.dumps(payload).encode("utf-8")
+        )
 
+        try:
             with urllib.request.urlopen(req_sessions, timeout=30) as resp:
                 session_data = json.loads(resp.read().decode("utf-8"))
                 remote_session_id = session_data.get("name") or session_data.get("id")
+                remote_state = session_data.get("state", "QUEUED")
 
                 if remote_session_id:
-                    update_job_remote_id(db_path, job_id, remote_session_id)
+                    try:
+                        update_job_remote_id(db_path, job_id, remote_session_id, remote_state)
+                    except Exception as e:
+                        # Persistence failed, but remote session exists!
+                        return {
+                            "error": "Session submitted but failed to record locally. Use jules_agent_job_id to track it manually.",
+                            "task_id": job_id,
+                            "jules_agent_job_id": remote_session_id,
+                            "status": "ERROR"
+                        }
                     return {
                         "message": "Tarea delegada con éxito. No es necesario esperar.",
                         "task_id": job_id,
@@ -116,24 +135,26 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
                     return {"error": "Invalid response from Jules API: missing session ID", "task_id": job_id, "status": "DESCONOCIDO"}
 
         except urllib.error.HTTPError as e:
-            # Confirmed failure from API
-            update_job_status(db_path, job_id, "FALLIDO")
-            try:
-                error_body = e.read().decode('utf-8')[:200]
-            except Exception:
-                error_body = "Unknown body"
-
-            error_msg = f"Jules API HTTP error {e.code}: {error_body}"
-            # Sanitize token if leaked in response
-            if app_config.jules_api_key in error_msg:
-                error_msg = error_msg.replace(app_config.jules_api_key, "***REDACTED***")
-
-            return {"error": error_msg, "task_id": job_id, "status": "FALLIDO"}
+            # Definite rejection vs uncertain execution
+            if e.code in (400, 401, 403, 404, 409, 422):
+                update_job_status(db_path, job_id, "FALLIDO")
+                return {"error": f"Jules API rejected POST /sessions request with HTTP error {e.code}", "task_id": job_id, "status": "FALLIDO"}
+            else:
+                # 5xx might mean it was queued or failed after being recorded
+                update_job_status(db_path, job_id, "DESCONOCIDO")
+                return {"error": f"Jules API returned ambiguous HTTP error {e.code} for POST /sessions", "task_id": job_id, "status": "DESCONOCIDO"}
         except Exception as e:
             # Timeout or other network error AFTER we potentially sent the request.
             # Outcome is uncertain. Do NOT automatically retry.
             update_job_status(db_path, job_id, "DESCONOCIDO")
-            return {"error": f"Failed to contact Jules API or connection timed out: {str(e)[:100]}", "task_id": job_id, "status": "DESCONOCIDO"}
+
+            # Redact API key from generic exception string before truncation
+            error_str = str(e)
+            if app_config.jules_api_key in error_str:
+                error_str = error_str.replace(app_config.jules_api_key, "***REDACTED***")
+            error_str = error_str[:100]
+
+            return {"error": f"Failed to contact Jules API or connection timed out: {error_str}", "task_id": job_id, "status": "DESCONOCIDO"}
 
     @mcp.tool()
     def jules_check_task_status(task_id: str) -> dict[str, Any]:
