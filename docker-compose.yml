@@ -41,6 +41,10 @@ services:
       # Origen exacto en el host utilizado por el orquestador y DockerAgyJobRunner
       - /home/ubuntu/.local/share/ia-mcp-vps/coding-jobs:/var/lib/coding-jobs
 
+      # Observabilidad: output dedicado para la DB limpia expuesta a Grafana.
+      # Grafana deberá montar RO este mismo directorio.
+      - /home/ubuntu/.local/share/ia-mcp-vps/jules-observability:/var/lib/jules-observability
+
       # Permite consultar/reiniciar contenedores del host.
       # OJO: docker.sock equivale a mucho poder sobre el host; mantener allowlists estrictas.
       - /var/run/docker.sock:/var/run/docker.sock
