@@ -301,12 +301,24 @@ def monitor_lifespan_factory(app_config):
             yield
             return
 
-        task = asyncio.create_task(background_monitor(app_config))
+        tasks = []
+        monitor_task = asyncio.create_task(background_monitor(app_config))
+        tasks.append(monitor_task)
+
+        if app_config.jules_observability_enabled:
+            from dari_mcp_vps.tools.jules_exporter import background_exporter
+            exporter_task = asyncio.create_task(background_exporter(app_config))
+            tasks.append(exporter_task)
+
         yield
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+
+        for task in tasks:
+            task.cancel()
+
+        for task in tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     return monitor_lifespan

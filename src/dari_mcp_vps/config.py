@@ -26,6 +26,18 @@ class AppConfig:
         return os.getenv('JULES_DB_PATH', self.raw.get('jules', {}).get('db_path', default_db))
 
     @property
+    def jules_observability_enabled(self):
+        return str(self.raw.get('jules', {}).get('observability', {}).get('enabled', 'false')).lower() == 'true'
+
+    @property
+    def jules_observability_output_dir(self):
+        return self.raw.get('jules', {}).get('observability', {}).get('output_dir', '/var/lib/jules-observability')
+
+    @property
+    def jules_observability_interval(self):
+        return int(self.raw.get('jules', {}).get('observability', {}).get('interval_seconds', 60))
+
+    @property
     def n8n_webhook_url(self):
         return os.getenv('N8N_WEBHOOK_URL', self.raw.get('jules', {}).get('n8n_webhook_url', ''))
 

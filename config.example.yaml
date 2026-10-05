@@ -1,5 +1,11 @@
 server:
   name: IA MCP VPS
+jules:
+  db_path: /var/lib/coding-jobs/jules_jobs.db
+  observability:
+    enabled: true
+    output_dir: /var/lib/jules-observability
+    interval_seconds: 60
 security:
   max_file_bytes: 200000
   max_log_lines: 500
