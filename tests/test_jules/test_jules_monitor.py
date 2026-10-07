@@ -592,3 +592,68 @@ async def test_monitor_logger_security(mock_urlopen, caplog):
         assert "mysecretkey123" not in record.message
         if "Failed with key" in record.message:
             assert "***REDACTED***" in record.message
+
+@patch("urllib.request.urlopen")
+@pytest.mark.asyncio
+async def test_state_fidelity_on_activities_failure_with_update(mock_urlopen):
+    db_path = "test_fidelity_update.db"
+    import os
+    if os.path.exists(db_path):
+        os.remove(db_path)
+
+    from dari_mcp_vps.tools.jules_db import init_db, create_job, update_job_remote_id, update_job_status
+    init_db(db_path)
+    job_id = create_job(db_path, "test/repo", "desc")
+    update_job_remote_id(db_path, job_id, "sessions/123")
+    update_job_status(db_path, job_id, "PENDIENTE", "QUEUED")
+
+    from dari_mcp_vps.config import AppConfig
+    class MockConfig(AppConfig):
+        def __init__(self):
+            super().__init__({"jules": {"api_key": "sec", "api_url": "http://url"}}, "")
+            self._db_path = db_path
+        @property
+        def jules_api_key(self):
+            return "sec"
+        @property
+        def jules_db_path(self):
+            return self._db_path
+
+    config = MockConfig()
+
+    import urllib.error
+    mock_session_resp = MagicMock()
+    mock_session_resp.read.return_value = json.dumps({"state": "IN_PROGRESS"}).encode("utf-8")
+
+    import io
+    err_fp = io.BytesIO(b"Not Found")
+    err_404 = urllib.error.HTTPError("http://url", 404, "Not Found", {}, err_fp)
+
+    mock_urlopen.side_effect = [
+        MagicMock(__enter__=lambda _: mock_session_resp, __exit__=lambda *a: None),
+        err_404
+    ]
+
+    from dari_mcp_vps.tools.jules_monitor import background_monitor
+    import asyncio
+
+    task = asyncio.create_task(background_monitor(config))
+    await asyncio.sleep(0.1) # Let it run one loop
+    task.cancel()
+
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    import sqlite3
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM jules_jobs WHERE id = ?", (job_id,))
+        job = dict(cursor.fetchone())
+
+    # State should update to EN_PROGRESO and IN_PROGRESS, regardless of activities failure
+    assert job["status"] == "EN_PROGRESO"
+    assert job["remote_state"] == "IN_PROGRESS"
+    assert job["remote_observed_at"] is not None

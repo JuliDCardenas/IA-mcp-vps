@@ -86,13 +86,42 @@ async def background_monitor(app_config):
                         with await loop.run_in_executor(None, open_func) as resp:
                             session_data = json.loads(resp.read().decode("utf-8"))
 
-                        record_job_observation(db_path, job["id"], success=True)
-
                         remote_state = session_data.get("state")
                         if not remote_state:
                             continue
 
                         last_known_state = job.get("remote_state")
+
+                        # Persist valid session state BEFORE checking activities
+                        if remote_state != last_known_state:
+                            local_status = job["status"]
+                            if remote_state in ("COMPLETED", "FAILED"):
+                                local_status = remote_state
+                            elif remote_state in ("AWAITING_PLAN_APPROVAL", "AWAITING_USER_FEEDBACK"):
+                                local_status = "ESPERANDO_FEEDBACK"
+                            else:
+                                local_status = "EN_PROGRESO"
+
+                            update_job_status(db_path, job["id"], local_status, remote_state)
+
+                            followup_pending_since = job.get("followup_pending_since")
+                            if followup_pending_since and remote_state not in ("COMPLETED", "FAILED", last_known_state):
+                                set_followup_pending(db_path, job["id"], False)
+                                followup_pending_since = None
+
+                            # Emit STATE_CHANGED immediately for non-terminal states
+                            if remote_state not in ("COMPLETED", "FAILED"):
+                                payload = {
+                                    "event_type": "STATE_CHANGED",
+                                    "task_id": job["id"],
+                                    "remote_session_id": session_id,
+                                    "repository": job["repo_name"],
+                                    "remote_state": remote_state,
+                                    "session_url": f"https://jules.google.com/session/{session_id.split('/')[-1]}"
+                                }
+                                record_event(db_path, job["id"], "STATE_CHANGED", payload)
+
+                        record_job_observation(db_path, job["id"], success=True)
                     except urllib.error.HTTPError as e:
                         try:
                             full_body = e.read().decode('utf-8')
@@ -245,27 +274,8 @@ async def background_monitor(app_config):
                             else:
                                 record_activity_processed(db_path, job["id"], dedup_id)
 
-                        # If state changed, OR if it's terminal and we just processed the completion activity
-                        if remote_state != last_known_state:
-                            local_status = job["status"]
-
-                            # Determine correct local status based on new remote state
-                            if remote_state in ("COMPLETED", "FAILED"):
-                                local_status = remote_state
-                            elif remote_state in ("AWAITING_PLAN_APPROVAL", "AWAITING_USER_FEEDBACK"):
-                                local_status = "ESPERANDO_FEEDBACK"
-                            else:
-                                local_status = "EN_PROGRESO"
-
-                            # If remote state changed to a non-terminal state, clear followup
-                            if followup_pending_since and remote_state not in ("COMPLETED", "FAILED", last_known_state):
-                                set_followup_pending(db_path, job["id"], False)
-                                followup_pending_since = None
-
-                            update_job_status(db_path, job["id"], local_status, remote_state)
-
-                        if remote_state != last_known_state and not seen_new_terminal_activity:
-                            # We have a state transition
+                        # If we transitioned to a terminal state but didn't find the terminal activity to emit an event
+                        if remote_state != last_known_state and remote_state in ("COMPLETED", "FAILED") and not seen_new_terminal_activity:
                             pr_url = None
                             context_msg = None
 
@@ -276,7 +286,6 @@ async def background_monitor(app_config):
                                         pr_url = out["pullRequest"]["url"]
                                         context_msg = out["pullRequest"].get("title", "")
 
-                            # Payload follows bounded contract
                             payload = {
                                 "event_type": "STATE_CHANGED",
                                 "task_id": job["id"],
@@ -287,11 +296,7 @@ async def background_monitor(app_config):
                                 "pr_url": pr_url,
                                 "context": context_msg
                             }
-
-                            # Strip Nones
                             payload = {k: v for k, v in payload.items() if v is not None}
-
-                            # The event gets recorded and its event_id and timestamp are auto-generated in DB
                             record_event(db_path, job["id"], "STATE_CHANGED", payload)
 
                         # If we saw a NEW terminal activity while tracking, clear followup
