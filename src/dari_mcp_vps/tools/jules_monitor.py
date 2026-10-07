@@ -78,9 +78,10 @@ async def background_monitor(app_config):
                         headers={"X-Goog-Api-Key": app_config.jules_api_key}
                     )
 
+                    import functools
+                    loop = asyncio.get_running_loop()
+
                     try:
-                        import functools
-                        loop = asyncio.get_running_loop()
                         open_func = functools.partial(urllib.request.urlopen, req, timeout=10)
                         with await loop.run_in_executor(None, open_func) as resp:
                             session_data = json.loads(resp.read().decode("utf-8"))
@@ -92,7 +93,31 @@ async def background_monitor(app_config):
                             continue
 
                         last_known_state = job.get("remote_state")
+                    except urllib.error.HTTPError as e:
+                        try:
+                            full_body = e.read().decode('utf-8')
+                            if app_config.jules_api_key in full_body:
+                                full_body = full_body.replace(app_config.jules_api_key, "***REDACTED***")
+                            error_body = full_body[:200]
+                        except Exception:
+                            error_body = "Unknown body"
+                        err_msg = f"HTTP error {e.code}: {error_body}"
+                        record_job_observation(db_path, job["id"], success=False, error_msg=err_msg)
 
+                        # 404 means the session was deleted remotely, we should probably stop polling
+                        if e.code == 404:
+                            update_job_status(db_path, job["id"], "FALLIDO", "NOT_FOUND")
+                        logger.warning(f"Jules API HTTP error for job {job['id']}: {e.code}")
+                        continue
+                    except Exception as e:
+                        full_err = str(e)
+                        if app_config.jules_api_key in full_err:
+                            full_err = full_err.replace(app_config.jules_api_key, "***REDACTED***")
+                        record_job_observation(db_path, job["id"], success=False, error_msg=full_err[:200])
+                        logger.warning(f"Polling failure for job {job['id']}: {full_err[:100]}")
+                        continue
+
+                    try:
                         # Also check activities with pagination
                         all_activities = []
                         next_page_token = job.get("activities_cursor")
@@ -278,31 +303,18 @@ async def background_monitor(app_config):
                         if page_count > 0:
                             update_job_activities_cursor(db_path, job["id"], next_page_token)
 
-                    except urllib.error.HTTPError as e:
-                        try:
-                            full_body = e.read().decode('utf-8')
-                            if app_config.jules_api_key in full_body:
-                                full_body = full_body.replace(app_config.jules_api_key, "***REDACTED***")
-                            error_body = full_body[:200]
-                        except Exception:
-                            error_body = "Unknown body"
-                        err_msg = f"HTTP error {e.code}: {error_body}"
-                        record_job_observation(db_path, job["id"], success=False, error_msg=err_msg)
-
-                        # 404 means the session was deleted remotely, we should probably stop polling
-                        if e.code == 404:
-                            update_job_status(db_path, job["id"], "FALLIDO", "NOT_FOUND")
-                        logger.warning(f"Jules API HTTP error for job {job['id']}: {e.code}")
                     except Exception as e:
                         full_err = str(e)
                         if app_config.jules_api_key in full_err:
                             full_err = full_err.replace(app_config.jules_api_key, "***REDACTED***")
-                        record_job_observation(db_path, job["id"], success=False, error_msg=full_err[:200])
-                        # Polling/network failure is NOT a failed coding session.
-                        logger.warning(f"Polling failure for job {job['id']}: {e}")
+                        # Activities polling failure should NOT mark the job as failed or unobserved if session GET succeeded
+                        logger.warning(f"Activities polling failure for job {job['id']}: {full_err[:100]}")
 
         except Exception as e:
-            logger.error(f"Error in Jules background monitor loop: {e}")
+            full_err = str(e)
+            if app_config.jules_api_key in full_err:
+                full_err = full_err.replace(app_config.jules_api_key, "***REDACTED***")
+            logger.error(f"Error in Jules background monitor loop: {full_err[:200]}")
 
         await asyncio.sleep(60)
 

@@ -330,13 +330,21 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
                             elif "sessionCompleted" in act:
                                 full_content = "Session completed successfully."
                             else:
-                                full_content = json.dumps(act)
+                                full_content = f"Unsupported activity type: {act.get('activityType', 'UNKNOWN')}"
 
                             full_content = redact_secrets(full_content)
 
                             total_length = len(full_content)
                             chunk_size = 8000
-                            fragment = full_content[content_offset:content_offset + chunk_size]
+
+                            if content_offset < 0:
+                                return {"error": "content_offset cannot be negative"}
+                            if content_offset >= total_length:
+                                fragment = ""
+                                has_more = False
+                            else:
+                                fragment = full_content[content_offset:content_offset + chunk_size]
+                                has_more = (content_offset + chunk_size) < total_length
                             has_more = (content_offset + chunk_size) < total_length
 
                             return {
@@ -377,17 +385,17 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
 
                     fmt_act = {"id": act.get("id"), "activityType": act_type, "createTime": act.get("createTime")}
 
-                    def process_field(field_key, extract_fn, summary_fn=None):
+                    def process_field(field_key, out_key, extract_fn):
                         if field_key in act:
                             raw_val = extract_fn(act)
                             val = redact_secrets(raw_val)
                             if len(val) > 1000:
-                                fmt_act[field_key] = val[:1000] + "..."
+                                fmt_act[out_key] = val[:1000] + "..."
                                 fmt_act["is_truncated"] = True
                             else:
-                                fmt_act[field_key] = val
+                                fmt_act[out_key] = val
 
-                    process_field("agentMessaged", lambda a: a["agentMessaged"].get("agentMessage", ""))
+                    process_field("agentMessaged", "agentMessage", lambda a: a["agentMessaged"].get("agentMessage", ""))
 
                     def extract_plan(a):
                         p = a["planGenerated"].get("plan", {})
@@ -395,12 +403,12 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
                             steps = p.get("steps", [])
                             return f"Plan ID: {p.get('id', 'Unknown')}, Steps: {len(steps)}"
                         return str(p)
-                    process_field("planGenerated", extract_plan)
+                    process_field("planGenerated", "planGenerated", extract_plan)
 
                     if "sessionCompleted" in act:
                         fmt_act["sessionCompleted"] = "Session completed successfully."
 
-                    process_field("sessionFailed", lambda a: a["sessionFailed"].get("reason", "Unknown error"))
+                    process_field("sessionFailed", "sessionFailed", lambda a: a["sessionFailed"].get("reason", "Unknown error"))
 
                     formatted_activities.append(fmt_act)
 

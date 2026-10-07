@@ -113,7 +113,7 @@ async def test_monitor_completed_with_pr_and_webhook_retry(mock_sleep, mock_conf
     jules_resp = MagicMock()
     jules_resp.read.return_value = json.dumps({
         "state": "COMPLETED",
-        "outputs": [{"pullRequest": {"url": "https://github.com/my-repo/pull/1", "title": "My PR"}}]
+        "outputs": [{"pullRequest": {"http://url": "https://github.com/my-repo/pull/1", "title": "My PR"}}]
     }).encode("utf-8")
     jules_resp.status = 200
 
@@ -192,7 +192,7 @@ async def test_monitor_resume_after_feedback_and_restart(mock_sleep, mock_config
     jules_resp_completed = MagicMock()
     jules_resp_completed.read.return_value = json.dumps({
         "state": "COMPLETED",
-        "outputs": [{"pullRequest": {"url": "https://github.com/my-repo/pull/1", "title": "My PR"}}]
+        "outputs": [{"pullRequest": {"http://url": "https://github.com/my-repo/pull/1", "title": "My PR"}}]
     }).encode("utf-8")
     jules_resp_completed.status = 200
 
@@ -422,3 +422,173 @@ async def test_monitor_dedup_and_pagination(mock_sleep, mock_config):
         cursor.execute("SELECT count(*) FROM jules_events WHERE event_type = 'AGENT_MESSAGE'")
         count = cursor.fetchone()[0]
         assert count == 6 # Still 6
+
+@patch("urllib.request.urlopen")
+@pytest.mark.asyncio
+async def test_state_fidelity_on_activities_failure(mock_urlopen):
+    db_path = "test_fidelity.db"
+    import os
+    if os.path.exists(db_path):
+        os.remove(db_path)
+
+    from dari_mcp_vps.tools.jules_db import init_db, create_job, update_job_remote_id, update_job_status
+    init_db(db_path)
+    job_id = create_job(db_path, "test/repo", "desc")
+    update_job_remote_id(db_path, job_id, "sessions/123")
+
+    from dari_mcp_vps.config import AppConfig
+    class MockConfig(AppConfig):
+        def __init__(self):
+            super().__init__({"jules": {"api_key": "sec", "api_url": "http://url"}}, "")
+            self._db_path = db_path
+
+        @property
+        def jules_api_key(self):
+            return "sec"
+        @property
+        def jules_db_path(self):
+            return self._db_path
+
+    config = MockConfig()
+
+    import urllib.error
+    # Mock first call (session) to succeed, second call (activities) to return 404
+    mock_session_resp = MagicMock()
+    mock_session_resp.read.return_value = json.dumps({"state": "IN_PROGRESS"}).encode("utf-8")
+
+    import io
+    err_fp = io.BytesIO(b"Not Found")
+    err_404 = urllib.error.HTTPError("http://url", 404, "Not Found", {}, err_fp)
+
+    mock_urlopen.side_effect = [
+        MagicMock(__enter__=lambda _: mock_session_resp, __exit__=lambda *a: None),
+        err_404
+    ]
+
+    from dari_mcp_vps.tools.jules_monitor import background_monitor
+    import asyncio
+
+    task = asyncio.create_task(background_monitor(config))
+    await asyncio.sleep(0.1) # Let it run one loop
+    task.cancel()
+
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    import sqlite3
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM jules_jobs WHERE id = ?", (job_id,))
+        job = dict(cursor.fetchone())
+
+    # State should remain EN_PROGRESO (derived from IN_PROGRESS) and remote_observed_at should be populated
+    assert job["status"] == "EN_PROGRESO"
+    assert job["remote_observed_at"] is not None
+    assert job["remote_observation_error"] is None # We consider it a success because session was read
+
+@patch("urllib.request.urlopen")
+@pytest.mark.asyncio
+async def test_session_get_failure_updates_fidelity(mock_urlopen):
+    db_path = "test_fidelity_2.db"
+    import os
+    if os.path.exists(db_path):
+        os.remove(db_path)
+
+    from dari_mcp_vps.tools.jules_db import init_db, create_job, update_job_remote_id
+    init_db(db_path)
+    job_id = create_job(db_path, "test/repo", "desc")
+    update_job_remote_id(db_path, job_id, "sessions/123")
+
+    from dari_mcp_vps.config import AppConfig
+    class MockConfig(AppConfig):
+        def __init__(self):
+            super().__init__({"jules": {"api_key": "sec", "api_url": "http://url"}}, "")
+            self._db_path = db_path
+        @property
+        def jules_api_key(self):
+            return "sec"
+        @property
+        def jules_db_path(self):
+            return self._db_path
+
+    config = MockConfig()
+
+    import urllib.error
+    import io
+    err_fp = io.BytesIO(b"Not Found")
+    err_404 = urllib.error.HTTPError("http://url", 404, "Not Found", {}, err_fp)
+    mock_urlopen.side_effect = err_404
+
+    from dari_mcp_vps.tools.jules_monitor import background_monitor
+    import asyncio
+
+    task = asyncio.create_task(background_monitor(config))
+    await asyncio.sleep(0.1) # Let it run one loop
+    task.cancel()
+
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    import sqlite3
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM jules_jobs WHERE id = ?", (job_id,))
+        job = dict(cursor.fetchone())
+
+    # State should become FALLIDO, remote_state NOT_FOUND
+    assert job["status"] == "FALLIDO"
+    assert job["remote_state"] == "NOT_FOUND"
+    assert job["remote_observation_error"] is not None
+
+@patch("urllib.request.urlopen")
+@pytest.mark.asyncio
+async def test_monitor_logger_security(mock_urlopen, caplog):
+    db_path = "test_sec.db"
+    import os
+    if os.path.exists(db_path):
+        os.remove(db_path)
+
+    from dari_mcp_vps.tools.jules_db import init_db, create_job, update_job_remote_id
+    init_db(db_path)
+    job_id = create_job(db_path, "test/repo", "desc")
+    update_job_remote_id(db_path, job_id, "sessions/123")
+
+    from dari_mcp_vps.config import AppConfig
+    class MockConfig(AppConfig):
+        def __init__(self):
+            super().__init__({"jules": {"api_key": "mysecretkey123", "api_url": "http://url"}}, "")
+            self._db_path = db_path
+        @property
+        def jules_api_key(self):
+            return "mysecretkey123"
+        @property
+        def jules_db_path(self):
+            return self._db_path
+
+    config = MockConfig()
+
+    # Force a RuntimeError with the secret key in the message
+    mock_urlopen.side_effect = RuntimeError("Failed with key mysecretkey123 something else")
+
+    from dari_mcp_vps.tools.jules_monitor import background_monitor
+    import asyncio
+
+    task = asyncio.create_task(background_monitor(config))
+    await asyncio.sleep(0.1) # Let it run one loop
+    task.cancel()
+
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    for record in caplog.records:
+        assert "mysecretkey123" not in record.message
+        if "Failed with key" in record.message:
+            assert "***REDACTED***" in record.message
