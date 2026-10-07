@@ -258,15 +258,23 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
             "jules_agent_job_id": job["jules_agent_job_id"],
             "status": job["status"],
             "remote_state": job.get("remote_state"),
+            "remote_observed_at": job.get("remote_observed_at"),
+            "remote_observation_error": job.get("remote_observation_error"),
             "created_at": job["created_at"],
             "updated_at": job["updated_at"]
         }
 
     @mcp.tool(tags=["jules"], annotations={"readOnlyHint": False})
-    def jules_get_task_activities(task_id: str, page_size: int = 20, page_token: str | None = None) -> dict[str, Any]:
-        """Get a paginated list of activities for a specific Jules task.
-        Use page_token from the previous response to get the next page.
-        Do not query this repeatedly without a page token. Limits to 1-100 items per page."""
+    def jules_get_task_activities(
+        task_id: str,
+        page_size: int = 20,
+        page_token: str | None = None,
+        activity_id: str | None = None,
+        content_offset: int = 0
+    ) -> dict[str, Any]:
+        """Get a paginated list of activities for a specific Jules task, or fetch a specific activity's full content in chunks.
+        If `activity_id` is provided, fetches the requested activity in chunks of 8000 chars starting at `content_offset`.
+        List Mode Limits: 1-100 items per page."""
         if not app_config.jules_api_key:
             return {"error": "JULES_API_KEY is not configured"}
 
@@ -285,42 +293,114 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
         if not session_id:
             return {"error": f"Task ID {task_id} does not have a remote session ID."}
 
-        url = f"{app_config.jules_api_url}/{session_id}/activities?pageSize={page_size}"
-        if page_token:
-            url += f"&pageToken={urllib.parse.quote(page_token)}"
+        def fetch_page(token: str | None) -> dict[str, Any]:
+            url = f"{app_config.jules_api_url}/{session_id}/activities?pageSize={page_size}"
+            if token:
+                url += f"&pageToken={urllib.parse.quote(token)}"
 
-        req = urllib.request.Request(
-            url,
-            method="GET",
-            headers={"X-Goog-Api-Key": app_config.jules_api_key}
-        )
+            req = urllib.request.Request(url, method="GET", headers={"X-Goog-Api-Key": app_config.jules_api_key})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+
+        def redact_secrets(text: str) -> str:
+            if not isinstance(text, str):
+                return text
+            if app_config.jules_api_key and app_config.jules_api_key in text:
+                return text.replace(app_config.jules_api_key, "***REDACTED***")
+            return text
 
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+            if activity_id:
+                # Detail Mode: Search for the activity (bounded to 5 pages)
+                current_token = page_token
+                pages_checked = 0
+                while pages_checked < 5:
+                    data = fetch_page(current_token)
+                    activities = data.get("activities", [])
+                    for act in activities:
+                        if act.get("id") == activity_id:
+                            # Extract full content based on type
+                            full_content = ""
+                            if "agentMessaged" in act:
+                                full_content = act["agentMessaged"].get("agentMessage", "")
+                            elif "planGenerated" in act:
+                                full_content = json.dumps(act["planGenerated"].get("plan", {}), indent=2)
+                            elif "sessionFailed" in act:
+                                full_content = act["sessionFailed"].get("reason", "Unknown error")
+                            elif "sessionCompleted" in act:
+                                full_content = "Session completed successfully."
+                            else:
+                                full_content = json.dumps(act)
 
-                # Format activities to reduce size/noise
+                            full_content = redact_secrets(full_content)
+
+                            total_length = len(full_content)
+                            chunk_size = 8000
+                            fragment = full_content[content_offset:content_offset + chunk_size]
+                            has_more = (content_offset + chunk_size) < total_length
+
+                            return {
+                                "source": "api",
+                                "consulted_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                                "activity_id": activity_id,
+                                "fragment": fragment,
+                                "total_length": total_length,
+                                "has_more": has_more,
+                                "next_content_offset": content_offset + chunk_size if has_more else None
+                            }
+
+                    current_token = data.get("nextPageToken")
+                    if not current_token:
+                        break
+                    pages_checked += 1
+
+                # If not found within the budget
+                return {
+                    "source": "api",
+                    "consulted_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "error": f"Activity {activity_id} not found within search budget.",
+                    "nextPageToken": current_token
+                }
+
+            else:
+                # List Mode
+                data = fetch_page(page_token)
                 formatted_activities = []
                 for act in data.get("activities", []):
-                    # We just copy it but truncate any large fields
-                    fmt_act = {"id": act.get("id"), "activityType": act.get("activityType"), "createTime": act.get("createTime")}
+                    act_type = act.get("activityType")
+                    if not act_type:
+                        if "agentMessaged" in act: act_type = "AGENT_MESSAGED"
+                        elif "planGenerated" in act: act_type = "PLAN_GENERATED"
+                        elif "sessionCompleted" in act: act_type = "SESSION_COMPLETED"
+                        elif "sessionFailed" in act: act_type = "SESSION_FAILED"
+                        else: act_type = "UNKNOWN"
 
-                    if "agentMessaged" in act:
-                        msg = act["agentMessaged"].get("agentMessage", "")
-                        fmt_act["agentMessage"] = msg[:1000] + ("..." if len(msg) > 1000 else "")
-                    elif "planGenerated" in act:
-                        plan_data = act["planGenerated"].get("plan", {})
-                        if isinstance(plan_data, dict):
-                            steps = plan_data.get("steps", [])
-                            summary = f"Plan ID: {plan_data.get('id', 'Unknown')}, Steps: {len(steps)}"
-                        else:
-                            summary = str(plan_data)
-                        fmt_act["planGenerated"] = summary[:1000] + ("..." if len(summary) > 1000 else "")
-                    elif "sessionCompleted" in act:
+                    fmt_act = {"id": act.get("id"), "activityType": act_type, "createTime": act.get("createTime")}
+
+                    def process_field(field_key, extract_fn, summary_fn=None):
+                        if field_key in act:
+                            raw_val = extract_fn(act)
+                            val = redact_secrets(raw_val)
+                            if len(val) > 1000:
+                                fmt_act[field_key] = val[:1000] + "..."
+                                fmt_act["is_truncated"] = True
+                            else:
+                                fmt_act[field_key] = val
+
+                    process_field("agentMessaged", lambda a: a["agentMessaged"].get("agentMessage", ""))
+
+                    def extract_plan(a):
+                        p = a["planGenerated"].get("plan", {})
+                        if isinstance(p, dict):
+                            steps = p.get("steps", [])
+                            return f"Plan ID: {p.get('id', 'Unknown')}, Steps: {len(steps)}"
+                        return str(p)
+                    process_field("planGenerated", extract_plan)
+
+                    if "sessionCompleted" in act:
                         fmt_act["sessionCompleted"] = "Session completed successfully."
-                    elif "sessionFailed" in act:
-                        reason = act["sessionFailed"].get("reason", "Unknown error")
-                        fmt_act["sessionFailed"] = reason[:500] + ("..." if len(reason) > 500 else "")
+
+                    process_field("sessionFailed", lambda a: a["sessionFailed"].get("reason", "Unknown error"))
 
                     formatted_activities.append(fmt_act)
 
@@ -334,14 +414,12 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
         except urllib.error.HTTPError as e:
             try:
                 full_body = e.read().decode('utf-8')
-                if app_config.jules_api_key in full_body:
-                    full_body = full_body.replace(app_config.jules_api_key, "***REDACTED***")
+                full_body = redact_secrets(full_body)
                 error_body = full_body[:200]
             except Exception:
                 error_body = "Unknown body"
             return {"error": f"Jules API HTTP error {e.code}: {error_body}"}
         except Exception as e:
             full_err = str(e)
-            if app_config.jules_api_key in full_err:
-                full_err = full_err.replace(app_config.jules_api_key, "***REDACTED***")
+            full_err = redact_secrets(full_err)
             return {"error": f"Failed to contact Jules API: {full_err[:100]}"}

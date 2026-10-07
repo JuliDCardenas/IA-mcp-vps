@@ -17,6 +17,7 @@ from dari_mcp_vps.tools.jules_db import (
     record_activity_and_event,
     set_followup_pending,
     update_job_activities_cursor,
+    record_job_observation,
 )
 
 logger = logging.getLogger(__name__)
@@ -83,6 +84,8 @@ async def background_monitor(app_config):
                         open_func = functools.partial(urllib.request.urlopen, req, timeout=10)
                         with await loop.run_in_executor(None, open_func) as resp:
                             session_data = json.loads(resp.read().decode("utf-8"))
+
+                        record_job_observation(db_path, job["id"], success=True)
 
                         remote_state = session_data.get("state")
                         if not remote_state:
@@ -276,11 +279,25 @@ async def background_monitor(app_config):
                             update_job_activities_cursor(db_path, job["id"], next_page_token)
 
                     except urllib.error.HTTPError as e:
+                        try:
+                            full_body = e.read().decode('utf-8')
+                            if app_config.jules_api_key in full_body:
+                                full_body = full_body.replace(app_config.jules_api_key, "***REDACTED***")
+                            error_body = full_body[:200]
+                        except Exception:
+                            error_body = "Unknown body"
+                        err_msg = f"HTTP error {e.code}: {error_body}"
+                        record_job_observation(db_path, job["id"], success=False, error_msg=err_msg)
+
                         # 404 means the session was deleted remotely, we should probably stop polling
                         if e.code == 404:
                             update_job_status(db_path, job["id"], "FALLIDO", "NOT_FOUND")
                         logger.warning(f"Jules API HTTP error for job {job['id']}: {e.code}")
                     except Exception as e:
+                        full_err = str(e)
+                        if app_config.jules_api_key in full_err:
+                            full_err = full_err.replace(app_config.jules_api_key, "***REDACTED***")
+                        record_job_observation(db_path, job["id"], success=False, error_msg=full_err[:200])
                         # Polling/network failure is NOT a failed coding session.
                         logger.warning(f"Polling failure for job {job['id']}: {e}")
 

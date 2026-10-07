@@ -58,6 +58,35 @@ def init_db(db_path: str) -> None:
         except sqlite3.OperationalError:
             pass # Column likely already exists
 
+        try:
+            cursor.execute("ALTER TABLE jules_jobs ADD COLUMN remote_observed_at TIMESTAMP")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            cursor.execute("ALTER TABLE jules_jobs ADD COLUMN remote_observation_error TEXT")
+        except sqlite3.OperationalError:
+            pass
+
+        conn.commit()
+
+def record_job_observation(db_path: str, job_id: str, success: bool, error_msg: Optional[str] = None) -> None:
+    """Record the last successful fetch timestamp and any fetch errors."""
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        if success:
+            cursor.execute("""
+                UPDATE jules_jobs
+                SET remote_observed_at = ?, remote_observation_error = NULL
+                WHERE id = ?
+            """, (now, job_id))
+        else:
+            cursor.execute("""
+                UPDATE jules_jobs
+                SET remote_observation_error = ?
+                WHERE id = ?
+            """, (error_msg, job_id))
         conn.commit()
 
 def get_active_jobs(db_path: str) -> list[Dict[str, Any]]:
