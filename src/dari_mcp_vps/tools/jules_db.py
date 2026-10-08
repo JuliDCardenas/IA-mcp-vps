@@ -261,3 +261,45 @@ def get_job(db_path: str, job_id: str) -> Optional[Dict[str, Any]]:
         if row:
             return dict(row)
         return None
+
+def update_job_status_and_observation_and_event(
+    db_path: str,
+    job_id: str,
+    status: str,
+    remote_state: str,
+    clear_followup: bool,
+    event_type: Optional[str] = None,
+    payload_dict: Optional[Dict[str, Any]] = None
+) -> None:
+    """Update job status, record observation, optionally clear followup, and atomically record an event."""
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+
+        # 1. Update job
+        update_q = "UPDATE jules_jobs SET status = ?, updated_at = ?, remote_state = ?, remote_observed_at = ?, remote_observation_error = NULL"
+        params = [status, now, remote_state, now]
+        if clear_followup:
+            update_q += ", followup_pending_since = NULL"
+
+        update_q += " WHERE id = ?"
+        params.append(job_id)
+
+        cursor.execute(update_q, tuple(params))
+
+        # 2. Record Event
+        if event_type and payload_dict is not None:
+            event_id = str(uuid.uuid4())
+            payload_dict["event_id"] = event_id
+            payload_dict["timestamp"] = now
+
+            import json
+            payload_str = json.dumps(payload_dict)
+
+            cursor.execute("""
+                INSERT INTO jules_events (id, job_id, event_type, payload, status, created_at)
+                VALUES (?, ?, ?, ?, 'PENDING', ?)
+            """, (event_id, job_id, event_type, payload_str, now))
+
+        conn.commit()

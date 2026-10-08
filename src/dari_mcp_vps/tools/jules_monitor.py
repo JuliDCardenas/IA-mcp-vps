@@ -17,6 +17,7 @@ from dari_mcp_vps.tools.jules_db import (
     record_activity_and_event,
     set_followup_pending,
     update_job_activities_cursor,
+    update_job_status_and_observation_and_event,
     record_job_observation,
 )
 
@@ -91,37 +92,55 @@ async def background_monitor(app_config):
                             continue
 
                         last_known_state = job.get("remote_state")
+                        followup_pending_since = job.get("followup_pending_since")
 
-                        # Persist valid session state BEFORE checking activities
+                        # Persist valid session state BEFORE checking activities, guaranteeing fidelity
                         if remote_state != last_known_state:
                             local_status = job["status"]
-                            if remote_state in ("COMPLETED", "FAILED"):
-                                local_status = remote_state
+                            if remote_state == "COMPLETED":
+                                local_status = "COMPLETADO"
+                            elif remote_state == "FAILED":
+                                local_status = "FALLIDO"
                             elif remote_state in ("AWAITING_PLAN_APPROVAL", "AWAITING_USER_FEEDBACK"):
                                 local_status = "ESPERANDO_FEEDBACK"
                             else:
                                 local_status = "EN_PROGRESO"
 
-                            update_job_status(db_path, job["id"], local_status, remote_state)
-
-                            followup_pending_since = job.get("followup_pending_since")
+                            clear_followup = False
                             if followup_pending_since and remote_state not in ("COMPLETED", "FAILED", last_known_state):
-                                set_followup_pending(db_path, job["id"], False)
+                                clear_followup = True
                                 followup_pending_since = None
 
-                            # Emit STATE_CHANGED immediately for non-terminal states
-                            if remote_state not in ("COMPLETED", "FAILED"):
-                                payload = {
-                                    "event_type": "STATE_CHANGED",
-                                    "task_id": job["id"],
-                                    "remote_session_id": session_id,
-                                    "repository": job["repo_name"],
-                                    "remote_state": remote_state,
-                                    "session_url": f"https://jules.google.com/session/{session_id.split('/')[-1]}"
-                                }
-                                record_event(db_path, job["id"], "STATE_CHANGED", payload)
+                            # We emit STATE_CHANGED for all transitions right here
+                            pr_url = None
+                            context_msg = None
 
-                        record_job_observation(db_path, job["id"], success=True)
+                            if remote_state == "COMPLETED":
+                                outputs = session_data.get("outputs", [])
+                                for out in outputs:
+                                    if "pullRequest" in out and "url" in out["pullRequest"]:
+                                        pr_url = out["pullRequest"]["url"]
+                                        context_msg = out["pullRequest"].get("title", "")
+
+                            payload = {
+                                "event_type": "STATE_CHANGED",
+                                "task_id": job["id"],
+                                "remote_session_id": session_id,
+                                "repository": job["repo_name"],
+                                "remote_state": remote_state,
+                                "session_url": f"https://jules.google.com/session/{session_id.split('/')[-1]}",
+                                "pr_url": pr_url,
+                                "context": context_msg
+                            }
+                            payload = {k: v for k, v in payload.items() if v is not None}
+
+                            update_job_status_and_observation_and_event(
+                                db_path, job["id"], local_status, remote_state, clear_followup, "STATE_CHANGED", payload
+                            )
+                        else:
+                            # Just record observation
+                            record_job_observation(db_path, job["id"], success=True)
+
                     except urllib.error.HTTPError as e:
                         try:
                             full_body = e.read().decode('utf-8')
@@ -233,71 +252,31 @@ async def background_monitor(app_config):
                                     event_type = "PLAN_GENERATED"
                                     context_msg = "A new plan has been generated."
                                 elif "sessionFailed" in activity:
-                                    event_type = "SESSION_FAILED"
-                                    context_msg = activity["sessionFailed"].get("reason", "Unknown failure reason")
+                                    # Since we already emitted STATE_CHANGED when we observed FAILED, we just mark it processed
+                                    pass
                                 elif "sessionCompleted" in activity:
-                                    event_type = "SESSION_COMPLETED"
-                                    context_msg = "Session completed successfully."
+                                    # Since we already emitted STATE_CHANGED when we observed COMPLETED, we just mark it processed
+                                    pass
                                 elif activity_type in ("SESSION_COMPLETED", "SESSION_FAILED"):
-                                    event_type = activity_type
-                                    context_msg = f"Session reached terminal state: {activity_type}"
+                                    # Redundant, marked processed
+                                    pass
 
                             # If it's one of our interesting activities AND it's new, emit an event
                             if event_type:
-                                pr_url = None
-                                if remote_state == "COMPLETED":
-                                    outputs = session_data.get("outputs", [])
-                                    for out in outputs:
-                                        if "pullRequest" in out and "url" in out["pullRequest"]:
-                                            pr_url = out["pullRequest"]["url"]
-                                            if not context_msg or "Session completed" in context_msg:
-                                                context_msg = out["pullRequest"].get("title", "")
-
                                 payload = {
                                     "event_type": event_type,
                                     "task_id": job["id"],
                                     "remote_session_id": session_id,
                                     "repository": job["repo_name"],
-                                    "remote_state": remote_state,
                                     "session_url": f"https://jules.google.com/session/{session_id.split('/')[-1]}",
-                                    "pr_url": pr_url,
                                     "context": context_msg,
                                     "activity_id": activity_id
                                 }
-
-                                # Omit remote_state from AGENT_MESSAGE to avoid confusion
-                                if event_type == "AGENT_MESSAGE":
-                                    del payload["remote_state"]
 
                                 payload = {k: v for k, v in payload.items() if v is not None}
                                 record_activity_and_event(db_path, job["id"], dedup_id, event_type, payload)
                             else:
                                 record_activity_processed(db_path, job["id"], dedup_id)
-
-                        # If we transitioned to a terminal state but didn't find the terminal activity to emit an event
-                        if remote_state != last_known_state and remote_state in ("COMPLETED", "FAILED") and not seen_new_terminal_activity:
-                            pr_url = None
-                            context_msg = None
-
-                            if remote_state == "COMPLETED":
-                                outputs = session_data.get("outputs", [])
-                                for out in outputs:
-                                    if "pullRequest" in out and "url" in out["pullRequest"]:
-                                        pr_url = out["pullRequest"]["url"]
-                                        context_msg = out["pullRequest"].get("title", "")
-
-                            payload = {
-                                "event_type": "STATE_CHANGED",
-                                "task_id": job["id"],
-                                "remote_session_id": session_id,
-                                "repository": job["repo_name"],
-                                "remote_state": remote_state,
-                                "session_url": f"https://jules.google.com/session/{session_id.split('/')[-1]}",
-                                "pr_url": pr_url,
-                                "context": context_msg
-                            }
-                            payload = {k: v for k, v in payload.items() if v is not None}
-                            record_event(db_path, job["id"], "STATE_CHANGED", payload)
 
                         # If we saw a NEW terminal activity while tracking, clear followup
                         if followup_pending_since and seen_new_terminal_activity:

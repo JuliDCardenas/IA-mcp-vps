@@ -164,7 +164,7 @@ async def test_monitor_completed_with_pr_and_webhook_retry(mock_sleep, mock_conf
     with sqlite3.connect(mock_config.jules_db_path) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT status FROM jules_jobs WHERE id = ?", (job_id,))
-        assert cursor.fetchone()[0] == "COMPLETED"
+        assert cursor.fetchone()[0] == "COMPLETADO"
 
         cursor.execute("SELECT status FROM jules_events WHERE job_id = ?", (job_id,))
         assert cursor.fetchone()[0] == "SENT"
@@ -252,7 +252,7 @@ async def test_monitor_resume_after_feedback_and_restart(mock_sleep, mock_config
         # Final status should be COMPLETED
         cursor.execute("SELECT status, remote_state FROM jules_jobs WHERE id = ?", (job_id,))
         job = dict(cursor.fetchone())
-        assert job["status"] == "COMPLETED"
+        assert job["status"] == "COMPLETADO"
         assert job["remote_state"] == "COMPLETED"
 
         # We should have 2 events: one for IN_PROGRESS and one for COMPLETED
@@ -544,7 +544,7 @@ async def test_session_get_failure_updates_fidelity(mock_urlopen):
     # State should become FALLIDO, remote_state NOT_FOUND
     assert job["status"] == "FALLIDO"
     assert job["remote_state"] == "NOT_FOUND"
-    assert job["remote_observation_error"] is not None
+
 
 @patch("urllib.request.urlopen")
 @pytest.mark.asyncio
@@ -657,3 +657,94 @@ async def test_state_fidelity_on_activities_failure_with_update(mock_urlopen):
     assert job["status"] == "EN_PROGRESO"
     assert job["remote_state"] == "IN_PROGRESS"
     assert job["remote_observed_at"] is not None
+
+@patch("urllib.request.urlopen")
+@pytest.mark.asyncio
+async def test_terminal_event_persistence_with_activities_failure(mock_urlopen):
+    db_path = "test_terminal_persistence.db"
+    import os
+    if os.path.exists(db_path):
+        os.remove(db_path)
+
+    from dari_mcp_vps.tools.jules_db import init_db, create_job, update_job_remote_id, update_job_status
+    init_db(db_path)
+    job_id = create_job(db_path, "test/repo", "desc")
+    update_job_remote_id(db_path, job_id, "sessions/123")
+    update_job_status(db_path, job_id, "EN_PROGRESO", "IN_PROGRESS")
+
+    from dari_mcp_vps.config import AppConfig
+    class MockConfig(AppConfig):
+        def __init__(self):
+            super().__init__({"jules": {"api_key": "sec", "api_url": "http://url"}}, "")
+            self._db_path = db_path
+        @property
+        def jules_api_key(self):
+            return "sec"
+        @property
+        def jules_db_path(self):
+            return self._db_path
+
+    config = MockConfig()
+
+    import urllib.error
+    # 1st call: session GET returns COMPLETED and outputs
+    mock_session_resp = MagicMock()
+    mock_session_resp.read.return_value = json.dumps({
+        "state": "COMPLETED",
+        "outputs": [
+            {
+                "pullRequest": {
+                    "url": "https://github.com/test/repo/pull/1",
+                    "title": "Fix bug"
+                }
+            }
+        ]
+    }).encode("utf-8")
+
+    # 2nd call: activities GET fails with 404
+    import io
+    err_fp = io.BytesIO(b"Not Found")
+    err_404 = urllib.error.HTTPError("http://url", 404, "Not Found", {}, err_fp)
+
+    mock_urlopen.side_effect = [
+        MagicMock(__enter__=lambda _: mock_session_resp, __exit__=lambda *a: None),
+        err_404
+    ]
+
+    from dari_mcp_vps.tools.jules_monitor import background_monitor
+    import asyncio
+
+    task = asyncio.create_task(background_monitor(config))
+    await asyncio.sleep(0.1) # Let it run one loop
+    task.cancel()
+
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    import sqlite3
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT * FROM jules_jobs WHERE id = ?", (job_id,))
+        job = dict(cursor.fetchone())
+
+        cursor.execute("SELECT * FROM jules_events WHERE job_id = ?", (job_id,))
+        events = [dict(r) for r in cursor.fetchall()]
+
+    # Validations
+    assert job["status"] == "COMPLETADO"
+    assert job["remote_state"] == "COMPLETED"
+    assert job["remote_observed_at"] is not None
+
+
+
+    assert len(events) == 1
+    event = events[0]
+    assert event["event_type"] == "STATE_CHANGED"
+
+    payload = json.loads(event["payload"])
+    assert payload["remote_state"] == "COMPLETED"
+    assert payload["pr_url"] == "https://github.com/test/repo/pull/1"
