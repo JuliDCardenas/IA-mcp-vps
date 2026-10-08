@@ -24,7 +24,12 @@ Se crearán nuevas herramientas exclusivas bajo un módulo dedicado (`src/dari_m
   - **Acción:** Realiza un POST a la API de Jules, genera un ID único, inserta el registro en la BD SQLite local, lanza un webhook a n8n, y devuelve a Notion un mensaje de éxito inmediato.
 - `jules_check_task_status`:
   - **Parámetros:** `task_id` (string).
-  - **Acción:** Consulta la BD SQLite local y devuelve el estado actual y el historial del trabajo. (Nota: el estado final será validado externamente).
+  - **Acción:** Consulta la BD SQLite local y devuelve el estado actual y el historial del trabajo. Incluye los campos `remote_observed_at` y `remote_observation_error` para determinar la frescura de los datos respecto a la API de Jules sin requerir una consulta en tiempo real.
+- `jules_get_task_activities`:
+  - **Parámetros:** `task_id` (string), `page_size` (int, opcional), `page_token` (string, opcional), `activity_id` (string, opcional), `content_offset` (int, opcional).
+  - **Acción:** Obtiene las actividades de una tarea.
+    - **Modo listado (sin `activity_id`):** Devuelve una lista paginada de actividades (máx 100), sanitizando cualquier secreto y truncando textos largos a 1000 caracteres (indicado con `is_truncated`). Extrae automáticamente `activityType` si falta en el payload de la API.
+    - **Modo detalle (con `activity_id`):** Busca en hasta 5 páginas la actividad específica. Una vez encontrada, devuelve fragmentos íntegros de hasta 8000 caracteres usando el `content_offset` (con `has_more` para continuar). La lectura a través de esta herramienta es independiente del monitor y no afecta los cursores de notificación ni su deduplicación.
 - `jules_reply_to_task`:
   - **Parámetros:** `task_id` (string), `feedback_or_approval` (string).
   - **Acción:** Envía una respuesta (POST) a la sesión pausada de Jules a través de su API para reanudar el trabajo tras una solicitud de contexto o aprobación, y actualiza el estado en la BD local.

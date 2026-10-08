@@ -283,3 +283,201 @@ def test_check_task_status(mcp_app):
 
     not_found = jules_check_task_status("invalid-id")
     assert not_found["status"] == "NOT_FOUND"
+
+@patch("urllib.request.urlopen")
+def test_jules_get_task_activities_list_mode(mock_urlopen, mcp_app):
+    tools, config = mcp_app
+    jules_get_task_activities = tools["jules_get_task_activities"]
+
+    from dari_mcp_vps.tools.jules_db import init_db
+    init_db(config.jules_db_path)
+
+    import sqlite3
+    with sqlite3.connect(config.jules_db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO jules_jobs (id, repo_name, task_description, jules_agent_job_id, status, created_at, updated_at) VALUES ('t1', 'repo', 'desc', 'session1', 'PENDING', '2023', '2023')")
+        conn.commit()
+
+    mock_resp = MagicMock()
+    # Missing activityType to test derivation, and secret key in text to test sanitation before truncation
+    long_msg = "X" * 1500 + config.jules_api_key + "Y" * 10
+    mock_resp.read.return_value = json.dumps({
+        "activities": [
+            {
+                "id": "act1",
+                "createTime": "2023",
+                "agentMessaged": {"agentMessage": long_msg}
+            }
+        ],
+        "nextPageToken": "token2"
+    }).encode("utf-8")
+
+    mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+    result = jules_get_task_activities("t1")
+    assert "error" not in result
+    assert len(result["activities"]) == 1
+    act = result["activities"][0]
+
+    # Derived type
+    assert act["activityType"] == "AGENT_MESSAGED"
+
+    # Truncated
+    assert act.get("is_truncated") is True
+    msg = act["agentMessage"]
+    assert len(msg) <= 1003 # 1000 + "..."
+    assert config.jules_api_key not in msg
+
+@patch("urllib.request.urlopen")
+def test_jules_get_task_activities_detail_mode(mock_urlopen, mcp_app):
+    tools, config = mcp_app
+    jules_get_task_activities = tools["jules_get_task_activities"]
+
+    from dari_mcp_vps.tools.jules_db import init_db
+    init_db(config.jules_db_path)
+
+    import sqlite3
+    with sqlite3.connect(config.jules_db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO jules_jobs (id, repo_name, task_description, jules_agent_job_id, status, created_at, updated_at) VALUES ('t1', 'repo', 'desc', 'session1', 'PENDING', '2023', '2023')")
+        conn.commit()
+
+    # The content we want to chunk, including a secret
+    long_content = "A" * 8000 + "B" * 4000 + config.jules_api_key + "C" * 100
+    expected_redacted = "A" * 8000 + "B" * 4000 + "***REDACTED***" + "C" * 100
+
+    mock_resp1 = MagicMock()
+    mock_resp1.read.return_value = json.dumps({
+        "activities": [
+            {"id": "act_other"}
+        ],
+        "nextPageToken": "token2"
+    }).encode("utf-8")
+
+    mock_resp2 = MagicMock()
+    mock_resp2.read.return_value = json.dumps({
+        "activities": [
+            {
+                "id": "act_target",
+                "agentMessaged": {"agentMessage": long_content}
+            }
+        ]
+    }).encode("utf-8")
+
+    mock_urlopen.side_effect = [
+        MagicMock(__enter__=lambda _: mock_resp1, __exit__=lambda *a: None),
+        MagicMock(__enter__=lambda _: mock_resp2, __exit__=lambda *a: None)
+    ]
+
+    # First fetch (offset 0)
+    res1 = jules_get_task_activities("t1", activity_id="act_target", content_offset=0)
+    assert res1["activity_id"] == "act_target"
+    assert len(res1["fragment"]) == 8000
+    assert res1["fragment"] == expected_redacted[0:8000]
+    assert res1["has_more"] is True
+    assert res1["next_content_offset"] == 8000
+    assert res1["total_length"] == len(expected_redacted)
+
+    # Reset mocks for next offset call
+    mock_urlopen.side_effect = [
+        MagicMock(__enter__=lambda _: mock_resp1, __exit__=lambda *a: None),
+        MagicMock(__enter__=lambda _: mock_resp2, __exit__=lambda *a: None)
+    ]
+
+    res2 = jules_get_task_activities("t1", activity_id="act_target", content_offset=8000)
+    assert res2["fragment"] == expected_redacted[8000:16000]
+    assert res2["has_more"] is False
+    assert res2["next_content_offset"] is None
+    assert "***REDACTED***" in res2["fragment"]
+    assert config.jules_api_key not in res2["fragment"]
+
+def test_job_observation_persistence(mcp_app):
+    tools, config = mcp_app
+    jules_check_task_status = tools["jules_check_task_status"]
+
+    from dari_mcp_vps.tools.jules_db import init_db, record_job_observation
+    init_db(config.jules_db_path)
+
+    import sqlite3
+    with sqlite3.connect(config.jules_db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO jules_jobs (id, repo_name, task_description, status, created_at, updated_at) VALUES ('obs1', 'repo', 'desc', 'PENDING', '2023', '2023')")
+        conn.commit()
+
+    record_job_observation(config.jules_db_path, "obs1", success=True)
+    st = jules_check_task_status("obs1")
+    assert st["remote_observed_at"] is not None
+    assert st["remote_observation_error"] is None
+
+    record_job_observation(config.jules_db_path, "obs1", success=False, error_msg="fail")
+    st2 = jules_check_task_status("obs1")
+    assert st2["remote_observation_error"] == "fail"
+    # remote_observed_at should remain intact (last known success)
+    assert st2["remote_observed_at"] == st["remote_observed_at"]
+
+@patch("urllib.request.urlopen")
+def test_jules_get_task_activities_unsupported_type(mock_urlopen, mcp_app):
+    tools, config = mcp_app
+    jules_get_task_activities = tools["jules_get_task_activities"]
+
+    from dari_mcp_vps.tools.jules_db import init_db
+    init_db(config.jules_db_path)
+    import sqlite3
+    with sqlite3.connect(config.jules_db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO jules_jobs (id, repo_name, task_description, jules_agent_job_id, status, created_at, updated_at) VALUES ('t_unsup', 'repo', 'desc', 'session1', 'PENDING', '2023', '2023')")
+        conn.commit()
+
+    mock_resp = MagicMock()
+    # A progress update with artifacts/patch
+    mock_resp.read.return_value = json.dumps({
+        "activities": [
+            {
+                "id": "act_patch",
+                "activityType": "PROGRESS_UPDATED",
+                "progressUpdated": {
+                    "changeSet": {"gitPatch": "diff --git a/file.txt b/file.txt..."}
+                }
+            }
+        ]
+    }).encode("utf-8")
+
+    mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+    res = jules_get_task_activities("t_unsup", activity_id="act_patch", content_offset=0)
+    assert res["fragment"] == "Unsupported activity type: PROGRESS_UPDATED"
+    assert res["has_more"] is False
+
+@patch("urllib.request.urlopen")
+def test_jules_get_task_activities_invalid_offset(mock_urlopen, mcp_app):
+    tools, config = mcp_app
+    jules_get_task_activities = tools["jules_get_task_activities"]
+
+    from dari_mcp_vps.tools.jules_db import init_db
+    init_db(config.jules_db_path)
+    import sqlite3
+    with sqlite3.connect(config.jules_db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO jules_jobs (id, repo_name, task_description, jules_agent_job_id, status, created_at, updated_at) VALUES ('t_off', 'repo', 'desc', 'session1', 'PENDING', '2023', '2023')")
+        conn.commit()
+
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = json.dumps({
+        "activities": [
+            {
+                "id": "act_msg",
+                "agentMessaged": {"agentMessage": "Hello"}
+            }
+        ]
+    }).encode("utf-8")
+
+    mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+    res1 = jules_get_task_activities("t_off", activity_id="act_msg", content_offset=-1)
+    assert "error" in res1
+    assert "cannot be negative" in res1["error"]
+
+    res2 = jules_get_task_activities("t_off", activity_id="act_msg", content_offset=10)
+    assert res2["fragment"] == ""
+    assert res2["has_more"] is False
+    assert res2["next_content_offset"] is None
