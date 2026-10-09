@@ -94,9 +94,9 @@ El subsistema expone 12 herramientas integradas para trabajos de auditoría e im
 ## Entorno de contenedores
 
 - `discover_containers`: Inspección limitada y de solo lectura de la API Docker para retornar candidatos. Devuelve atributos seguros sin exponer mounts, paths, environment ni outputs de error en crudo.
-- `discover_compose_projects`: Localiza metadatos de configuración en rutas seguras (`docker-compose.yml`, etc). Aplica restricciones completas de paths (denied files, limites de tamaño).
-- `discover_http_targets`: Proyecta servicios HTTP probables. Identifica destinos de forma segura, diferenciando puertos mapeados de puertos privados inalcanzables. No ejecuta pruebas de red a nuevos puertos no publicados.
-- `suggest_allowlist_updates`: Compara la lista de configuración (`allowlists`) con los componentes descubiertos y genera fragmentos en YAML de validación manual para actualización segura de dependencias. Nunca altera ni reinicia servicios por sí mismo.
+- `discover_compose_projects`: Localiza metadatos de configuración en rutas seguras (`docker-compose.yml`, etc). Aplica restricciones completas de paths (denied files, limites de tamaño) mediante una búsqueda iterativa justa (BFS/level-order) para encontrar directorios de servicios explícitos antes de agotar el presupuesto en subdirectorios profundos.
+- `discover_http_targets`: Proyecta servicios HTTP probables. Identifica destinos de forma segura, diferenciando puertos mapeados de puertos privados inalcanzables. No ejecuta pruebas de red a nuevos puertos no publicados ni deduce alcanzabilidad real sin evidencia.
+- `suggest_allowlist_updates`: Compara la lista de configuración (`allowlists`) con los componentes descubiertos y genera fragmentos en YAML de validación manual para actualización segura de dependencias. Omite sugerencias de mapeos conservadores ambiguos (ej. loopback IP no configuradas explícitamente en el orquestador). Desduplica orígenes sin descartar rutas de endpoints ya configurados. Nunca altera ni reinicia servicios por sí mismo.
 
 ### Límites Finitos
 
