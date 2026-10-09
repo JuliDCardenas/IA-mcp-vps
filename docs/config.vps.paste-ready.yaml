@@ -122,6 +122,9 @@ allowed_containers:
   - code-server
   - ollama
   - open-webui
+  - stirling-pdf
+  - sentia-web
+  - mcp-grafana
 
 allowed_compose_projects:
   ia_mcp_vps:
