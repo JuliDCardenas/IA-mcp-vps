@@ -300,25 +300,63 @@ def test_compose_metadata_truncation(registered_tools, mock_app_config):
     assert proj["metadata_truncated"] is True
 
 def test_compose_discovery_bfs_budget_fairness(registered_tools, mock_app_config):
-    _, scope_dir = mock_app_config
+    # Test 1 (Overlapping scopes limit) and Test 2 (Scandir entry limit) combined:
+    config, scope_dir = mock_app_config
 
-    # 205 noise dirs in .cache, plus an explicit service
-    cache_dir = scope_dir / ".cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    for i in range(205):
-        (cache_dir / str(i)).mkdir()
+    # Setup test 1: overlapping explicit and broad scopes.
+    # config already has:
+    # "allowed_paths": {
+    #     "test_scope": {"root": str(scope_dir)}
+    # }
+    explicit_scope = scope_dir / "service_a"
+    explicit_scope.mkdir()
+    (explicit_scope / "docker-compose.yml").write_text("services:\n  app:\n    image: a")
 
-    service_dir = scope_dir / "service_a"
-    service_dir.mkdir()
-    (service_dir / "docker-compose.yml").write_text("services:\n  app:\n    image: a")
+    service_b = scope_dir / "service_b"
+    service_b.mkdir()
+    (service_b / "docker-compose.yml").write_text("services:\n  app:\n    image: b")
+
+    # Add the explicit scope to allowed_paths
+    config.raw["allowed_paths"]["explicit_a"] = {"root": str(explicit_scope)}
 
     discover_compose_projects = registered_tools["discover_compose_projects"]
-    res = discover_compose_projects()
+    res = discover_compose_projects(limit=2)
 
     assert res["ok"] is True
-    assert res["truncated"] is True
-    assert res["count"] == 1
-    assert "service_a" in res["projects"][0]["path"]
+    assert res["count"] == 2
+    paths = [p["path"] for p in res["projects"]]
+    assert str(explicit_scope / "docker-compose.yml") in paths
+    assert str(service_b / "docker-compose.yml") in paths
+
+def test_compose_discovery_scandir_limit(registered_tools, mock_app_config):
+    config, scope_dir = mock_app_config
+
+    # Mocking a directory with 10000 entries using patch on os.scandir to prevent making 10000 real dirs
+    import os
+    from unittest.mock import patch
+
+    class MockDirEntry:
+        def __init__(self, path, is_d):
+            self.path = path
+            self._is_dir = is_d
+            self.name = os.path.basename(path)
+        def is_dir(self): return self._is_dir
+        def is_file(self): return not self._is_dir
+
+    def mock_scandir_impl(top):
+        top_str = str(top)
+        if top_str == str(scope_dir):
+            return [MockDirEntry(f"{top_str}/{i}", True) for i in range(10000)]
+        return []
+
+    with patch('os.scandir', side_effect=mock_scandir_impl):
+        discover_compose_projects = registered_tools["discover_compose_projects"]
+        res = discover_compose_projects()
+
+        assert res["ok"] is True
+        assert res["truncated"] is True
+        assert res["partial_failure"] is True
+        assert any("exceeded budget" in err for err in res["errors"])
 
 @patch('dari_mcp_vps.tools.discovery._json')
 def test_suggest_allowlist_http_loopback_omission(mock_json, registered_tools, mock_app_config):
@@ -371,4 +409,4 @@ def test_suggest_allowlist_http_existing_path(mock_json, registered_tools, mock_
     assert res["ok"] is True
     if res.get("yaml_snippet"):
         targets = yaml.safe_load(res["yaml_snippet"]).get("allowed_http_targets", {})
-        assert "ia_mcp_vps_8787" not in targets
+        assert "ia-mcp-vps_8787" not in targets

@@ -64,6 +64,7 @@ def register_discovery_tools(mcp: Any, app_config: Any) -> None:
         limit = max(1, min(limit, 100))
         allowed_paths = app_config.raw.get("allowed_paths", {})
         found = []
+        seen_paths = set()
         errors = []
         truncated = False
         partial_failure = False
@@ -100,7 +101,7 @@ def register_discovery_tools(mcp: Any, app_config: Any) -> None:
             total_walk_count += 1
 
             try:
-                entries = list(os.scandir(current_dir))
+                entries_iter = os.scandir(current_dir)
             except Exception:
                 errors.append("SCOPE_WALK_ERROR: Permission denied or inaccessible directory during traversal.")
                 partial_failure = True
@@ -108,17 +109,37 @@ def register_discovery_tools(mcp: Any, app_config: Any) -> None:
 
             dirs = []
             files = []
-            for entry in entries:
-                try:
-                    if entry.is_dir():
-                        dirs.append(entry.path)
-                    elif entry.is_file():
-                        files.append(entry.name)
-                except Exception:
-                    continue
+            entry_count = 0
+            MAX_DIR_ENTRIES_BUDGET = 2000
+            MAX_QUEUE_SIZE = 1000
+
+            try:
+                for entry in entries_iter:
+                    entry_count += 1
+                    if entry_count > MAX_DIR_ENTRIES_BUDGET:
+                        truncated = True
+                        partial_failure = True
+                        errors.append("SCOPE_WALK_ERROR: Directory entries exceeded budget.")
+                        break
+
+                    try:
+                        if entry.is_dir():
+                            dirs.append(entry.path)
+                        elif entry.is_file():
+                            files.append(entry.name)
+                    except Exception:
+                        continue
+            finally:
+                if hasattr(entries_iter, 'close'):
+                    entries_iter.close()
 
             dirs.sort()
             for d in dirs:
+                if len(queue) >= MAX_QUEUE_SIZE:
+                    truncated = True
+                    partial_failure = True
+                    errors.append("SCOPE_WALK_ERROR: Queue size exceeded budget.")
+                    break
                 queue.append((Path(d).resolve(), root_path, scope_cfg, scope_name))
 
             for f in files:
@@ -151,15 +172,18 @@ def register_discovery_tools(mcp: Any, app_config: Any) -> None:
 
                             metadata_truncated = len(services) > 20 or len(networks) > 20 or len(volumes) > 20
 
-                            found.append({
-                                "path": str(resolved_path),
-                                "scope": scope_name,
-                                "services": services[:20],
-                                "networks": networks[:20],
-                                "volumes": volumes[:20],
-                                "project_name": data.get("name"),
-                                "metadata_truncated": metadata_truncated
-                            })
+                            resolved_path_str = str(resolved_path)
+                            if resolved_path_str not in seen_paths:
+                                seen_paths.add(resolved_path_str)
+                                found.append({
+                                    "path": resolved_path_str,
+                                    "scope": scope_name,
+                                    "services": services[:20],
+                                    "networks": networks[:20],
+                                    "volumes": volumes[:20],
+                                    "project_name": data.get("name"),
+                                    "metadata_truncated": metadata_truncated
+                                })
                         except Exception:
                             errors.append("YAML_PARSE_ERROR: Invalid YAML format.")
                             partial_failure = True
@@ -167,20 +191,12 @@ def register_discovery_tools(mcp: Any, app_config: Any) -> None:
                         errors.append("COMPOSE_READ_ERROR: Failed to resolve or read file.")
                         partial_failure = True
 
-        # Deduplicate
-        unique_found = []
-        seen = set()
-        for proj in found:
-            if proj["path"] not in seen:
-                seen.add(proj["path"])
-                unique_found.append(proj)
-
         return {
             "ok": True,
-            "count": len(unique_found),
+            "count": len(found),
             "truncated": truncated,
             "partial_failure": partial_failure,
-            "projects": unique_found[:limit],
+            "projects": found[:limit],
             "errors": list(set(errors))[:10]
         }
 
@@ -292,8 +308,10 @@ def register_discovery_tools(mcp: Any, app_config: Any) -> None:
 
         try:
             from urllib.parse import urlparse
-            def _is_candidate_covered(cand_ip: str, cand_port: int, allowed_urls: list[str]) -> bool:
-                local_hosts = {"127.0.0.1", "::1", "localhost", "host.docker.internal", "0.0.0.0", "::"}
+            def _is_candidate_covered(cand_scheme: str, cand_ip: str, cand_port: int, allowed_urls: list[str]) -> bool:
+                # Normalize wildcard to host.docker.internal before comparison
+                normalized_cand_ip = "host.docker.internal" if cand_ip in {"0.0.0.0", "::"} else cand_ip
+
                 for url in allowed_urls:
                     try:
                         parsed = urlparse(url)
@@ -301,11 +319,19 @@ def register_discovery_tools(mcp: Any, app_config: Any) -> None:
                         if url_port != cand_port:
                             continue
 
+                        if parsed.scheme and cand_scheme and parsed.scheme != cand_scheme:
+                            continue
+
                         url_host = parsed.hostname.strip("[]") if parsed.hostname else ""
-                        if url_host in local_hosts and cand_ip in local_hosts:
+
+                        if url_host == normalized_cand_ip:
                             return True
-                        if url_host == cand_ip:
+
+                        # Loopbacks match loopbacks
+                        if normalized_cand_ip in {"127.0.0.1", "::1", "localhost"} and url_host in {"127.0.0.1", "::1", "localhost"}:
                             return True
+
+                        # Wildcard mappings are covered if config maps them to host.docker.internal (which we normalized to above)
                     except Exception:
                         pass
                 return False
@@ -319,7 +345,7 @@ def register_discovery_tools(mcp: Any, app_config: Any) -> None:
                     if not cand["published"]:
                         continue # do not suggest mapping unpublished private ports
 
-                    if _is_candidate_covered(cand["ip"], cand["port"], allowed_http_urls):
+                    if _is_candidate_covered(cand["scheme"], cand["ip"], cand["port"], allowed_http_urls):
                         continue
 
                     target_name = f"{cand['container_name']}_{cand['port']}"
