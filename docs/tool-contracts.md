@@ -94,16 +94,16 @@ El subsistema expone 12 herramientas integradas para trabajos de auditoría e im
 ## Entorno de contenedores
 
 - `discover_containers`: Inspección limitada y de solo lectura de la API Docker para retornar candidatos. Devuelve atributos seguros sin exponer mounts, paths, environment ni outputs de error en crudo.
-- `discover_compose_projects`: Localiza metadatos de configuración en rutas seguras (`docker-compose.yml`, etc). Aplica restricciones completas de paths (denied files, limites de tamaño).
-- `discover_http_targets`: Proyecta servicios HTTP probables. Identifica destinos de forma segura, diferenciando puertos mapeados de puertos privados inalcanzables. No ejecuta pruebas de red a nuevos puertos no publicados.
-- `suggest_allowlist_updates`: Compara la lista de configuración (`allowlists`) con los componentes descubiertos y genera fragmentos en YAML de validación manual para actualización segura de dependencias. Nunca altera ni reinicia servicios por sí mismo.
+- `discover_compose_projects`: Localiza metadatos de configuración en rutas seguras (`docker-compose.yml`, etc). Aplica restricciones completas de paths (denied files, limites de tamaño) mediante una búsqueda iterativa justa (BFS/level-order) para encontrar directorios de servicios explícitos antes de agotar el presupuesto en subdirectorios profundos.
+- `discover_http_targets`: Proyecta servicios HTTP probables. Identifica destinos de forma segura, diferenciando puertos mapeados de puertos privados inalcanzables. No ejecuta pruebas de red a nuevos puertos no publicados ni deduce alcanzabilidad real sin evidencia.
+- `suggest_allowlist_updates`: Compara la lista de configuración (`allowlists`) con los componentes descubiertos y genera fragmentos en YAML de validación manual para actualización segura de dependencias. Omite sugerencias de mapeos conservadores ambiguos (ej. loopback IP no configuradas explícitamente en el orquestador). Desduplica orígenes sin descartar rutas de endpoints ya configurados. Nunca altera ni reinicia servicios por sí mismo.
 
 ### Límites Finitos
 
 Todos los endpoints de descubrimiento aplican límites de seguridad robustos:
 - Las llamadas que devuelven listas aplican un límite estricto de elementos a devolver (`limit = max(1, min(limit, 100))`). Incluyen un atributo booleano global `truncated` indicando si los resultados fueron limitados.
 - Adicionalmente el escáner del `docker-compose.yml` retorna un atributo `metadata_truncated` por proyecto individual, indicando si los resultados de los `services`, `networks` o `volumes` excedieron el máximo configurado por el agregador (20).
-- El descubrimiento de metadatos mediante `os.walk` implementa un presupuesto máximo de inspección estricto de 200 directorios visitados antes de detenerse y devolver resultados parciales (`truncated = True`).
+- El descubrimiento de metadatos implementa un presupuesto estricto de visita a través de `os.scandir` evaluado de manera perezosa, limitando el número de archivos leídos por directorio (`MAX_DIR_ENTRIES_BUDGET=2000`) y la cola máxima transversal (`MAX_QUEUE_SIZE=1000`) antes de detenerse y emitir una señal explícita de `truncated = True` y fallos parciales honestos para garantizar un consumo fijo en repositorios masivos.
 - Las lecturas de los archivos (ej. metadatos en YAML) evalúan la restricción `max_file_bytes` de la configuración antes de la lectura.
 
 ### Despliegue Manual y Recuperación (Revert)

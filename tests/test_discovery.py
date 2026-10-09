@@ -240,14 +240,12 @@ def test_discover_http_targets_internal_udp(mock_json, registered_tools):
 
 
 
-@patch('os.walk')
+@patch('os.scandir')
 def test_os_walk_permission_error(mock_walk, registered_tools, mock_app_config):
     _, scope_dir = mock_app_config
 
-    def mock_walk_impl(top, onerror=None, **kwargs):
-        if onerror:
-            onerror(PermissionError("Permission denied"))
-        return []
+    def mock_walk_impl(top, **kwargs):
+        raise PermissionError("Permission denied")
 
     mock_walk.side_effect = mock_walk_impl
 
@@ -300,3 +298,115 @@ def test_compose_metadata_truncation(registered_tools, mock_app_config):
 
     assert len(proj["services"]) == 20
     assert proj["metadata_truncated"] is True
+
+def test_compose_discovery_bfs_budget_fairness(registered_tools, mock_app_config):
+    # Test 1 (Overlapping scopes limit) and Test 2 (Scandir entry limit) combined:
+    config, scope_dir = mock_app_config
+
+    # Setup test 1: overlapping explicit and broad scopes.
+    # config already has:
+    # "allowed_paths": {
+    #     "test_scope": {"root": str(scope_dir)}
+    # }
+    explicit_scope = scope_dir / "service_a"
+    explicit_scope.mkdir()
+    (explicit_scope / "docker-compose.yml").write_text("services:\n  app:\n    image: a")
+
+    service_b = scope_dir / "service_b"
+    service_b.mkdir()
+    (service_b / "docker-compose.yml").write_text("services:\n  app:\n    image: b")
+
+    # Add the explicit scope to allowed_paths
+    config.raw["allowed_paths"]["explicit_a"] = {"root": str(explicit_scope)}
+
+    discover_compose_projects = registered_tools["discover_compose_projects"]
+    res = discover_compose_projects(limit=2)
+
+    assert res["ok"] is True
+    assert res["count"] == 2
+    paths = [p["path"] for p in res["projects"]]
+    assert str(explicit_scope / "docker-compose.yml") in paths
+    assert str(service_b / "docker-compose.yml") in paths
+
+def test_compose_discovery_scandir_limit(registered_tools, mock_app_config):
+    config, scope_dir = mock_app_config
+
+    # Mocking a directory with 10000 entries using patch on os.scandir to prevent making 10000 real dirs
+    import os
+    from unittest.mock import patch
+
+    class MockDirEntry:
+        def __init__(self, path, is_d):
+            self.path = path
+            self._is_dir = is_d
+            self.name = os.path.basename(path)
+        def is_dir(self): return self._is_dir
+        def is_file(self): return not self._is_dir
+
+    def mock_scandir_impl(top):
+        top_str = str(top)
+        if top_str == str(scope_dir):
+            return [MockDirEntry(f"{top_str}/{i}", True) for i in range(10000)]
+        return []
+
+    with patch('os.scandir', side_effect=mock_scandir_impl):
+        discover_compose_projects = registered_tools["discover_compose_projects"]
+        res = discover_compose_projects()
+
+        assert res["ok"] is True
+        assert res["truncated"] is True
+        assert res["partial_failure"] is True
+        assert any("exceeded budget" in err for err in res["errors"])
+
+@patch('dari_mcp_vps.tools.discovery._json')
+def test_suggest_allowlist_http_loopback_omission(mock_json, registered_tools, mock_app_config):
+    config, _ = mock_app_config
+
+    mock_json.side_effect = [
+        [], # First call for containers list
+        [
+            {
+                "Names": ["/loopback-app"],
+                "Ports": [{"PrivatePort": 80, "PublicPort": 8084, "IP": "127.0.0.1", "Type": "tcp"}]
+            },
+            {
+                "Names": ["/wildcard-app"],
+                "Ports": [{"PrivatePort": 80, "PublicPort": 9000, "IP": "0.0.0.0", "Type": "tcp"}]
+            }
+        ]
+    ]
+
+    suggest_allowlist_updates = registered_tools["suggest_allowlist_updates"]
+    res = suggest_allowlist_updates()
+
+    assert res["ok"] is True
+    yaml_dict = yaml.safe_load(res["yaml_snippet"])
+    targets = yaml_dict.get("allowed_http_targets", {})
+
+    # 127.0.0.1 should be omitted
+    assert "loopback-app_8084" not in targets
+    # 0.0.0.0 should be proposed as host.docker.internal
+    assert targets["wildcard-app_9000"]["url"] == "http://host.docker.internal:9000"
+
+
+@patch('dari_mcp_vps.tools.discovery._json')
+def test_suggest_allowlist_http_existing_path(mock_json, registered_tools, mock_app_config):
+    config, _ = mock_app_config
+
+    mock_json.side_effect = [
+        [], # First call
+        [
+            {
+                "Names": ["/ia-mcp-vps"],
+                "Ports": [{"PrivatePort": 8787, "PublicPort": 8787, "IP": "127.0.0.1", "Type": "tcp"}]
+            }
+        ]
+    ]
+
+    suggest_allowlist_updates = registered_tools["suggest_allowlist_updates"]
+    res = suggest_allowlist_updates()
+
+    assert res["ok"] is True
+    if res.get("yaml_snippet"):
+        targets = yaml.safe_load(res["yaml_snippet"]).get("allowed_http_targets", {})
+        assert "ia-mcp-vps_8787" not in targets

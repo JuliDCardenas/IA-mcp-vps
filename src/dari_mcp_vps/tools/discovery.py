@@ -64,6 +64,7 @@ def register_discovery_tools(mcp: Any, app_config: Any) -> None:
         limit = max(1, min(limit, 100))
         allowed_paths = app_config.raw.get("allowed_paths", {})
         found = []
+        seen_paths = set()
         errors = []
         truncated = False
         partial_failure = False
@@ -71,104 +72,131 @@ def register_discovery_tools(mcp: Any, app_config: Any) -> None:
         total_walk_count = 0
         MAX_WALK_BUDGET = 200
 
-        for scope_name, scope_cfg in allowed_paths.items():
-            if total_walk_count >= MAX_WALK_BUDGET or len(found) >= limit:
-                truncated = True
-                break
+        import collections
+        queue = collections.deque()
 
+        for scope_name, scope_cfg in allowed_paths.items():
             root_path_str = scope_cfg.get("root")
             if not root_path_str:
                 continue
 
             root_path = Path(root_path_str).expanduser().resolve()
-
             if not root_path.exists() or not root_path.is_dir():
                 errors.append(f"SCOPE_ERROR: Scope {scope_name} root missing.")
                 partial_failure = True
                 continue
 
-            def _walk_error(err):
-                nonlocal partial_failure
-                errors.append("SCOPE_WALK_ERROR: Permission denied or inaccessible directory during traversal.")
-                partial_failure = True
+            queue.append((root_path, root_path, scope_cfg, scope_name))
+
+        while queue:
+            if total_walk_count >= MAX_WALK_BUDGET or len(found) >= limit:
+                truncated = True
+                break
+
+            current_dir, root_path, scope_cfg, scope_name = queue.popleft()
+
+            if not current_dir.is_relative_to(root_path) or is_denied_path(app_config.raw, current_dir):
+                continue
+
+            total_walk_count += 1
 
             try:
-                for root, dirs, files in os.walk(root_path, onerror=_walk_error):
+                entries_iter = os.scandir(current_dir)
+            except Exception:
+                errors.append("SCOPE_WALK_ERROR: Permission denied or inaccessible directory during traversal.")
+                partial_failure = True
+                continue
 
-                    total_walk_count += 1
-                    if total_walk_count >= MAX_WALK_BUDGET or len(found) >= limit:
+            dirs = []
+            files = []
+            entry_count = 0
+            MAX_DIR_ENTRIES_BUDGET = 2000
+            MAX_QUEUE_SIZE = 1000
+
+            try:
+                for entry in entries_iter:
+                    entry_count += 1
+                    if entry_count > MAX_DIR_ENTRIES_BUDGET:
                         truncated = True
+                        partial_failure = True
+                        errors.append("SCOPE_WALK_ERROR: Directory entries exceeded budget.")
                         break
 
-                    current_dir = Path(root).resolve()
-                    if not current_dir.is_relative_to(root_path) or is_denied_path(app_config.raw, current_dir):
-                        dirs[:] = []
+                    try:
+                        if entry.is_dir():
+                            dirs.append(entry.path)
+                        elif entry.is_file():
+                            files.append(entry.name)
+                    except Exception:
                         continue
+            finally:
+                if hasattr(entries_iter, 'close'):
+                    entries_iter.close()
 
-                    for f in files:
-                        if f in ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"):
-                            compose_path = current_dir / f
-                            try:
-                                resolved_path = compose_path.resolve()
-                                if not resolved_path.is_relative_to(root_path):
-                                    continue
-                                if is_denied_path(app_config.raw, resolved_path):
-                                    continue
+            dirs.sort()
+            for d in dirs:
+                if len(queue) >= MAX_QUEUE_SIZE:
+                    truncated = True
+                    partial_failure = True
+                    errors.append("SCOPE_WALK_ERROR: Queue size exceeded budget.")
+                    break
+                queue.append((Path(d).resolve(), root_path, scope_cfg, scope_name))
 
-                                allowed_exts = set(scope_cfg.get('extensions', []))
-                                if allowed_exts and resolved_path.suffix not in allowed_exts:
-                                    continue
+            for f in files:
+                if f in ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"):
+                    compose_path = current_dir / f
+                    try:
+                        resolved_path = compose_path.resolve()
+                        if not resolved_path.is_relative_to(root_path):
+                            continue
+                        if is_denied_path(app_config.raw, resolved_path):
+                            continue
 
-                                file_size = resolved_path.stat().st_size
-                                max_size = int(app_config.raw.get('security', {}).get('max_file_bytes', 200000))
-                                if file_size > max_size:
-                                    errors.append("COMPOSE_READ_ERROR: File size exceeds allowed limits.")
-                                    partial_failure = True
-                                    continue
+                        allowed_exts = set(scope_cfg.get('extensions', []))
+                        if allowed_exts and resolved_path.suffix not in allowed_exts:
+                            continue
 
-                                content = resolved_path.read_text(encoding="utf-8")
-                                try:
-                                    data = yaml.safe_load(content) or {}
-                                    services = list(data.get("services", {}).keys()) if isinstance(data.get("services"), dict) else []
-                                    networks = list(data.get("networks", {}).keys()) if isinstance(data.get("networks"), dict) else []
-                                    volumes = list(data.get("volumes", {}).keys()) if isinstance(data.get("volumes"), dict) else []
+                        file_size = resolved_path.stat().st_size
+                        max_size = int(app_config.raw.get('security', {}).get('max_file_bytes', 200000))
+                        if file_size > max_size:
+                            errors.append("COMPOSE_READ_ERROR: File size exceeds allowed limits.")
+                            partial_failure = True
+                            continue
 
-                                    metadata_truncated = len(services) > 20 or len(networks) > 20 or len(volumes) > 20
+                        content_yaml = resolved_path.read_text(encoding="utf-8")
+                        try:
+                            data = yaml.safe_load(content_yaml) or {}
+                            services = list(data.get("services", {}).keys()) if isinstance(data.get("services"), dict) else []
+                            networks = list(data.get("networks", {}).keys()) if isinstance(data.get("networks"), dict) else []
+                            volumes = list(data.get("volumes", {}).keys()) if isinstance(data.get("volumes"), dict) else []
 
-                                    found.append({
-                                        "path": str(resolved_path),
-                                        "scope": scope_name,
-                                        "services": services[:20],
-                                        "networks": networks[:20],
-                                        "volumes": volumes[:20],
-                                        "project_name": data.get("name"),
-                                        "metadata_truncated": metadata_truncated
-                                    })
-                                except Exception:
-                                    errors.append("YAML_PARSE_ERROR: Invalid YAML format.")
-                                    partial_failure = True
-                            except Exception:
-                                errors.append("COMPOSE_READ_ERROR: Failed to resolve or read file.")
-                                partial_failure = True
+                            metadata_truncated = len(services) > 20 or len(networks) > 20 or len(volumes) > 20
 
-            except Exception:
-                errors.append("SCOPE_WALK_ERROR: Failed to traverse directory tree.")
-                partial_failure = True
-
-        # Deduplicate
-        unique_found = []
-        seen = set()
-        for proj in found:
-            if proj["path"] not in seen:
-                seen.add(proj["path"])
-                unique_found.append(proj)
+                            resolved_path_str = str(resolved_path)
+                            if resolved_path_str not in seen_paths:
+                                seen_paths.add(resolved_path_str)
+                                found.append({
+                                    "path": resolved_path_str,
+                                    "scope": scope_name,
+                                    "services": services[:20],
+                                    "networks": networks[:20],
+                                    "volumes": volumes[:20],
+                                    "project_name": data.get("name"),
+                                    "metadata_truncated": metadata_truncated
+                                })
+                        except Exception:
+                            errors.append("YAML_PARSE_ERROR: Invalid YAML format.")
+                            partial_failure = True
+                    except Exception:
+                        errors.append("COMPOSE_READ_ERROR: Failed to resolve or read file.")
+                        partial_failure = True
 
         return {
             "ok": True,
-            "count": len(unique_found),
+            "count": len(found),
             "truncated": truncated,
             "partial_failure": partial_failure,
-            "projects": unique_found[:limit],
+            "projects": found[:limit],
             "errors": list(set(errors))[:10]
         }
 
@@ -276,9 +304,38 @@ def register_discovery_tools(mcp: Any, app_config: Any) -> None:
         # 2. HTTP Targets
         allowed_http_targets_cfg = app_config.raw.get("allowed_http_targets", {})
         allowed_http_target_names = set(allowed_http_targets_cfg.keys())
-        allowed_http_urls = {v.get("url", "").rstrip("/") for v in allowed_http_targets_cfg.values() if isinstance(v, dict)}
+        allowed_http_urls = [v.get("url", "").rstrip("/") for v in allowed_http_targets_cfg.values() if isinstance(v, dict)]
 
         try:
+            from urllib.parse import urlparse
+            def _is_candidate_covered(cand_scheme: str, cand_ip: str, cand_port: int, allowed_urls: list[str]) -> bool:
+                # Normalize wildcard to host.docker.internal before comparison
+                normalized_cand_ip = "host.docker.internal" if cand_ip in {"0.0.0.0", "::"} else cand_ip
+
+                for url in allowed_urls:
+                    try:
+                        parsed = urlparse(url)
+                        url_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+                        if url_port != cand_port:
+                            continue
+
+                        if parsed.scheme and cand_scheme and parsed.scheme != cand_scheme:
+                            continue
+
+                        url_host = parsed.hostname.strip("[]") if parsed.hostname else ""
+
+                        if url_host == normalized_cand_ip:
+                            return True
+
+                        # Loopbacks match loopbacks
+                        if normalized_cand_ip in {"127.0.0.1", "::1", "localhost"} and url_host in {"127.0.0.1", "::1", "localhost"}:
+                            return True
+
+                        # Wildcard mappings are covered if config maps them to host.docker.internal (which we normalized to above)
+                    except Exception:
+                        pass
+                return False
+
             http_candidates_resp = discover_http_targets(limit=100)
             if http_candidates_resp.get("ok"):
                 if http_candidates_resp.get("truncated"):
@@ -288,15 +345,21 @@ def register_discovery_tools(mcp: Any, app_config: Any) -> None:
                     if not cand["published"]:
                         continue # do not suggest mapping unpublished private ports
 
-                    target_name = f"{cand['container_name']}_{cand['port']}"
+                    if _is_candidate_covered(cand["scheme"], cand["ip"], cand["port"], allowed_http_urls):
+                        continue
 
+                    target_name = f"{cand['container_name']}_{cand['port']}"
                     ip = cand["ip"]
-                    if ip == "0.0.0.0" or ip == "::":
+
+                    # Exclude likely unreachable host loopbacks if they are not explicitly mapped
+                    if ip in {"127.0.0.1", "::1"}:
+                        continue
+                    elif ip in {"0.0.0.0", "::"}:
                         ip = "host.docker.internal"
 
                     proposed_url = f"{cand['scheme']}://{ip}:{cand['port']}"
 
-                    if target_name not in allowed_http_target_names and proposed_url not in allowed_http_urls:
+                    if target_name not in allowed_http_target_names:
                         new_targets[target_name] = {
                             "url": proposed_url,
                             "note": cand["motive"],
