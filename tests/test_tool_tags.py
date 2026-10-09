@@ -64,7 +64,11 @@ async def test_tool_tags_metadata(test_mcp_app):
         "jules_request_coding_task": "jules",
         "jules_reply_to_task": "jules",
         "jules_check_task_status": "jules",
-        "jules_get_task_activities": "jules"
+        "jules_get_task_activities": "jules",
+        "discover_containers": "vps",
+        "discover_compose_projects": "vps",
+        "discover_http_targets": "vps",
+        "suggest_allowlist_updates": "vps",
     }
 
     tools = await test_mcp_app.list_tools()

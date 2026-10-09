@@ -16,6 +16,7 @@ from dari_mcp_vps.tools.coding_jobs import register_coding_job_tools
 from dari_mcp_vps.tools.private_coding_job import register_private_coding_job_tool
 from dari_mcp_vps.tools.jules_tools import register_jules_tools
 from dari_mcp_vps.tools.jules_monitor import monitor_lifespan_factory
+from dari_mcp_vps.tools.discovery import register_discovery_tools
 
 CONFIG = load_config()
 mcp = FastMCP(CONFIG.raw.get("server", {}).get("name", "IA MCP VPS"), lifespan=monitor_lifespan_factory(CONFIG))
@@ -30,6 +31,7 @@ register_http_tools(mcp, CONFIG)
 register_coding_job_tools(mcp, CONFIG)
 register_private_coding_job_tool(mcp, CONFIG)
 register_jules_tools(mcp, CONFIG)
+register_discovery_tools(mcp, CONFIG)
 
 
 def main() -> None:
