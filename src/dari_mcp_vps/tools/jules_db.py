@@ -217,17 +217,25 @@ def create_job(db_path: str, repo_name: str, task_description: str) -> str:
 
     return job_id
 
-def update_job_remote_id(db_path: str, job_id: str, remote_id: str) -> None:
-    """Update a job with its remote Jules session ID and set status to 'EN_PROGRESO'."""
+def update_job_remote_id(db_path: str, job_id: str, remote_id: str, remote_state: Optional[str] = None) -> None:
+    """Update a job with its remote Jules session ID and set status to 'EN_PROGRESO'.
+    Optionally stores the initial remote state."""
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE jules_jobs
-            SET jules_agent_job_id = ?, status = 'EN_PROGRESO', updated_at = ?
-            WHERE id = ?
-        """, (remote_id, now, job_id))
+        if remote_state is not None:
+            cursor.execute("""
+                UPDATE jules_jobs
+                SET jules_agent_job_id = ?, status = 'EN_PROGRESO', updated_at = ?, remote_state = ?
+                WHERE id = ?
+            """, (remote_id, now, remote_state, job_id))
+        else:
+            cursor.execute("""
+                UPDATE jules_jobs
+                SET jules_agent_job_id = ?, status = 'EN_PROGRESO', updated_at = ?
+                WHERE id = ?
+            """, (remote_id, now, job_id))
         conn.commit()
 
 def update_job_status(db_path: str, job_id: str, status: str, remote_state: Optional[str] = None) -> None:
