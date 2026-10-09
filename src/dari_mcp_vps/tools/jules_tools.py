@@ -45,29 +45,36 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
             next_page_token = None
             matched_sources = []
 
-            while True:
-                sources_url = f"{app_config.jules_api_url}/sources"
-                if next_page_token:
-                    sources_url += f"?pageToken={next_page_token}"
+            try:
+                while True:
+                    sources_url = f"{app_config.jules_api_url}/sources"
+                    if next_page_token:
+                        sources_url += f"?pageToken={next_page_token}"
 
-                req_sources = urllib.request.Request(
-                    sources_url,
-                    method="GET",
-                    headers={"X-Goog-Api-Key": app_config.jules_api_key}
-                )
+                    req_sources = urllib.request.Request(
+                        sources_url,
+                        method="GET",
+                        headers={"X-Goog-Api-Key": app_config.jules_api_key}
+                    )
 
-                with urllib.request.urlopen(req_sources, timeout=10) as resp:
-                    sources_data = json.loads(resp.read().decode("utf-8"))
-                    for source in sources_data.get("sources", []):
-                        name = source.get("name", "")
-                        id_ = source.get("id", "")
-                        # Match either exact canonical "owner/repo" or short "repo"
-                        if name.endswith(f"/{repo_name}") or id_.endswith(f"/{repo_name}") or name == repo_name or id_ == repo_name:
-                            matched_sources.append(name)
+                    with urllib.request.urlopen(req_sources, timeout=10) as resp:
+                        sources_data = json.loads(resp.read().decode("utf-8"))
+                        for source in sources_data.get("sources", []):
+                            name = source.get("name", "")
+                            id_ = source.get("id", "")
+                            # Match either exact canonical "owner/repo" or short "repo"
+                            if name.endswith(f"/{repo_name}") or id_.endswith(f"/{repo_name}") or name == repo_name or id_ == repo_name:
+                                matched_sources.append(name)
 
-                    next_page_token = sources_data.get("nextPageToken")
-                    if not next_page_token:
-                        break
+                        next_page_token = sources_data.get("nextPageToken")
+                        if not next_page_token:
+                            break
+            except urllib.error.HTTPError as e:
+                update_job_status(db_path, job_id, "FALLIDO")
+                return {"error": f"Failed to resolve repository (HTTP {e.code})", "task_id": job_id, "status": "FALLIDO"}
+            except Exception:
+                update_job_status(db_path, job_id, "FALLIDO")
+                return {"error": "Failed to resolve repository (network error or timeout)", "task_id": job_id, "status": "FALLIDO"}
 
             if not matched_sources:
                 update_job_status(db_path, job_id, "FALLIDO")
@@ -104,9 +111,19 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
             with urllib.request.urlopen(req_sessions, timeout=30) as resp:
                 session_data = json.loads(resp.read().decode("utf-8"))
                 remote_session_id = session_data.get("name") or session_data.get("id")
+                remote_state = session_data.get("state")
 
                 if remote_session_id:
-                    update_job_remote_id(db_path, job_id, remote_session_id)
+                    try:
+                        update_job_remote_id(db_path, job_id, remote_session_id, remote_state)
+                    except Exception:
+                        return {
+                            "error": "Failed to persist task locally, but remote session was created.",
+                            "task_id": job_id,
+                            "jules_agent_job_id": remote_session_id,
+                            "status": "EN_PROGRESO"
+                        }
+
                     return {
                         "message": "Tarea delegada con éxito. No es necesario esperar.",
                         "task_id": job_id,
@@ -119,27 +136,19 @@ def register_jules_tools(mcp: Any, app_config: Any) -> None:
                     return {"error": "Invalid response from Jules API: missing session ID", "task_id": job_id, "status": "DESCONOCIDO"}
 
         except urllib.error.HTTPError as e:
-            # Confirmed failure from API
-            update_job_status(db_path, job_id, "FALLIDO")
-            try:
-                # Redact first, then truncate
-                full_body = e.read().decode('utf-8')
-                if app_config.jules_api_key in full_body:
-                    full_body = full_body.replace(app_config.jules_api_key, "***REDACTED***")
-                error_body = full_body[:200]
-            except Exception:
-                error_body = "Unknown body"
-
-            error_msg = f"Jules API HTTP error {e.code}: {error_body}"
-            return {"error": error_msg, "task_id": job_id, "status": "FALLIDO"}
-        except Exception as e:
+            if e.code < 500:
+                # Confirmed rejection from API
+                update_job_status(db_path, job_id, "FALLIDO")
+                return {"error": f"API rejected session creation (HTTP {e.code})", "task_id": job_id, "status": "FALLIDO"}
+            else:
+                # 5xx error, outcome is uncertain
+                update_job_status(db_path, job_id, "DESCONOCIDO")
+                return {"error": f"Failed to contact API or connection timed out during submission (HTTP {e.code})", "task_id": job_id, "status": "DESCONOCIDO"}
+        except Exception:
             # Timeout or other network error AFTER we potentially sent the request.
             # Outcome is uncertain. Do NOT automatically retry.
             update_job_status(db_path, job_id, "DESCONOCIDO")
-            full_err = str(e)
-            if app_config.jules_api_key in full_err:
-                full_err = full_err.replace(app_config.jules_api_key, "***REDACTED***")
-            return {"error": f"Failed to contact Jules API or connection timed out: {full_err[:100]}", "task_id": job_id, "status": "DESCONOCIDO"}
+            return {"error": "Failed to contact API or connection timed out during submission", "task_id": job_id, "status": "DESCONOCIDO"}
 
     @mcp.tool(tags=["jules"], annotations={"readOnlyHint": False})
     def jules_reply_to_task(task_id: str, message: str) -> dict[str, Any]:
