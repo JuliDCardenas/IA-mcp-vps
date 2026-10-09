@@ -101,7 +101,8 @@ El subsistema expone 12 herramientas integradas para trabajos de auditoría e im
 ### Límites Finitos
 
 Todos los endpoints de descubrimiento aplican límites de seguridad robustos:
-- Las llamadas que devuelven listas aplican un límite estricto de elementos a devolver (`limit = max(1, min(limit, 100))`).
+- Las llamadas que devuelven listas aplican un límite estricto de elementos a devolver (`limit = max(1, min(limit, 100))`). Incluyen un atributo booleano global `truncated` indicando si los resultados fueron limitados.
+- Adicionalmente el escáner del `docker-compose.yml` retorna un atributo `metadata_truncated` por proyecto individual, indicando si los resultados de los `services`, `networks` o `volumes` excedieron el máximo configurado por el agregador (20).
 - El descubrimiento de metadatos mediante `os.walk` implementa un presupuesto máximo de inspección estricto de 200 directorios visitados antes de detenerse y devolver resultados parciales (`truncated = True`).
 - Las lecturas de los archivos (ej. metadatos en YAML) evalúan la restricción `max_file_bytes` de la configuración antes de la lectura.
 

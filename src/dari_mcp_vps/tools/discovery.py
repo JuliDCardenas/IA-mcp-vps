@@ -87,8 +87,14 @@ def register_discovery_tools(mcp: Any, app_config: Any) -> None:
                 partial_failure = True
                 continue
 
+            def _walk_error(err):
+                nonlocal partial_failure
+                errors.append("SCOPE_WALK_ERROR: Permission denied or inaccessible directory during traversal.")
+                partial_failure = True
+
             try:
-                for root, dirs, files in os.walk(root_path):
+                for root, dirs, files in os.walk(root_path, onerror=_walk_error):
+
                     total_walk_count += 1
                     if total_walk_count >= MAX_WALK_BUDGET or len(found) >= limit:
                         truncated = True
@@ -127,13 +133,16 @@ def register_discovery_tools(mcp: Any, app_config: Any) -> None:
                                     networks = list(data.get("networks", {}).keys()) if isinstance(data.get("networks"), dict) else []
                                     volumes = list(data.get("volumes", {}).keys()) if isinstance(data.get("volumes"), dict) else []
 
+                                    metadata_truncated = len(services) > 20 or len(networks) > 20 or len(volumes) > 20
+
                                     found.append({
                                         "path": str(resolved_path),
                                         "scope": scope_name,
                                         "services": services[:20],
                                         "networks": networks[:20],
                                         "volumes": volumes[:20],
-                                        "project_name": data.get("name")
+                                        "project_name": data.get("name"),
+                                        "metadata_truncated": metadata_truncated
                                     })
                                 except Exception:
                                     errors.append("YAML_PARSE_ERROR: Invalid YAML format.")
@@ -244,6 +253,7 @@ def register_discovery_tools(mcp: Any, app_config: Any) -> None:
         suggestions = {}
         errors = []
         partial_failure = False
+        truncated = False
 
         # 1. Containers
         allowed_containers = set(app_config.raw.get("allowed_containers", []))
@@ -256,6 +266,8 @@ def register_discovery_tools(mcp: Any, app_config: Any) -> None:
                     new_containers.append(name)
 
             if new_containers:
+                if len(new_containers) > 50:
+                    truncated = True
                 suggestions["allowed_containers"] = new_containers[:50]
         except Exception:
             errors.append("DOCKER_API_ERROR: Container discovery failed.")
@@ -270,8 +282,7 @@ def register_discovery_tools(mcp: Any, app_config: Any) -> None:
             http_candidates_resp = discover_http_targets(limit=100)
             if http_candidates_resp.get("ok"):
                 if http_candidates_resp.get("truncated"):
-                    partial_failure = True
-                    errors.append("DISCOVERY_TRUNCATED: HTTP targets were truncated.")
+                    truncated = True
                 new_targets = {}
                 for cand in http_candidates_resp.get("candidates", []):
                     if not cand["published"]:
@@ -309,9 +320,15 @@ def register_discovery_tools(mcp: Any, app_config: Any) -> None:
                 if compose_resp.get("partial_failure"):
                     partial_failure = True
                     errors.extend(compose_resp.get("errors", []))
+                if compose_resp.get("truncated"):
+                    truncated = True
 
                 new_compose = {}
+
                 for proj in compose_resp.get("projects", []):
+                    if proj.get("metadata_truncated"):
+                        truncated = True
+
                     already_allowed = False
                     for existing_proj in allowed_compose_projects.values():
                         if existing_proj.get("path") == proj["path"]:
@@ -344,6 +361,7 @@ def register_discovery_tools(mcp: Any, app_config: Any) -> None:
         return {
             "ok": True,
             "has_suggestions": bool(suggestions),
+            "truncated": truncated,
             "partial_failure": partial_failure,
             "yaml_snippet": yaml_snippet,
             "verification_steps": "Review the proposed YAML changes carefully. Ensure you want to expose these containers, paths, and HTTP targets. Merge manually into your configuration file and restart the service.",

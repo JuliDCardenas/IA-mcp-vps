@@ -180,7 +180,17 @@ def test_suggest_allowlist_updates(mock_json, registered_tools, mock_app_config)
     valid_yml = scope_dir / "docker-compose.yml"
     valid_yml.write_text("services:\n  new:\n    image: redis\nname: new_app")
 
+    # Monkeypatch the local tool directly instead of using @patch
     suggest_allowlist_updates = registered_tools["suggest_allowlist_updates"]
+    discover_compose_projects = registered_tools["discover_compose_projects"]
+    discover_compose_projects.fn = MagicMock(return_value={
+        "ok": True,
+        "count": 50,
+        "truncated": True,
+        "partial_failure": False,
+        "projects": [{"path": f"/tmp/p{i}/docker-compose.yml"} for i in range(50)],
+        "errors": []
+    })
 
     # We patch the inner discover_http_targets to avoid infinite loop / tricky mocking
     # Actually wait, we already register the tool. We can just patch `discover_http_targets.fn`
@@ -227,3 +237,66 @@ def test_discover_http_targets_internal_udp(mock_json, registered_tools):
     assert candidates[0]["container_name"] == "internal-web"
     assert candidates[0]["published"] is False
     assert candidates[0]["ip"] == "private/unreachable"
+
+
+
+@patch('os.walk')
+def test_os_walk_permission_error(mock_walk, registered_tools, mock_app_config):
+    _, scope_dir = mock_app_config
+
+    def mock_walk_impl(top, onerror=None, **kwargs):
+        if onerror:
+            onerror(PermissionError("Permission denied"))
+        return []
+
+    mock_walk.side_effect = mock_walk_impl
+
+    discover_compose_projects = registered_tools["discover_compose_projects"]
+    res = discover_compose_projects()
+
+    assert res["ok"] is True
+    assert res["count"] == 0
+    assert res["partial_failure"] is True
+    assert any("SCOPE_WALK_ERROR" in err for err in res["errors"])
+
+@patch('dari_mcp_vps.tools.discovery._json')
+def test_aggregator_truncation_compose(mock_json, registered_tools, mock_app_config):
+    # Test propagation of >50 containers and compose project truncation
+    mock_json.return_value = [{"Names": [f"/app{i}"], "Ports": []} for i in range(55)]
+    suggest_allowlist_updates = registered_tools["suggest_allowlist_updates"]
+
+    discover_compose_projects = registered_tools["discover_compose_projects"]
+
+    from unittest.mock import MagicMock
+    discover_compose_projects.fn = MagicMock(return_value={
+        "ok": True,
+        "count": 50,
+        "truncated": True,
+        "partial_failure": False,
+        "projects": [{"path": f"/tmp/p{i}/docker-compose.yml"} for i in range(50)],
+        "errors": []
+    })
+
+    res = suggest_allowlist_updates()
+    assert res["ok"] is True
+    assert res["truncated"] is True
+    import yaml
+    assert len(yaml.safe_load(res["yaml_snippet"])["allowed_containers"]) == 50
+
+def test_compose_metadata_truncation(registered_tools, mock_app_config):
+    _, scope_dir = mock_app_config
+    valid_yml = scope_dir / "docker-compose.yml"
+
+    # 21 services
+    services_yaml = "\n  ".join([f"web{i}: {{image: nginx}}" for i in range(21)])
+    valid_yml.write_text(f"services:\n  {services_yaml}\nname: my_test_proj")
+
+    discover_compose_projects = registered_tools["discover_compose_projects"]
+    res = discover_compose_projects()
+
+    assert res["ok"] is True
+    assert res["count"] == 1
+    proj = res["projects"][0]
+
+    assert len(proj["services"]) == 20
+    assert proj["metadata_truncated"] is True
