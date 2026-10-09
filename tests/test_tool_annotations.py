@@ -46,6 +46,10 @@ EXPECTED_CLASSIFICATION = {
     "jules_reply_to_task": False,
     "jules_check_task_status": False,
     "jules_get_task_activities": False,
+    "discover_containers": True,
+    "discover_compose_projects": True,
+    "discover_http_targets": True,
+    "suggest_allowlist_updates": True,
 }
 
 EXPECTED_TAGS = {
@@ -92,6 +96,10 @@ EXPECTED_TAGS = {
     "jules_reply_to_task": "jules",
     "jules_check_task_status": "jules",
     "jules_get_task_activities": "jules",
+    "discover_containers": "vps",
+    "discover_compose_projects": "vps",
+    "discover_http_targets": "vps",
+    "suggest_allowlist_updates": "vps",
 }
 
 @pytest.fixture

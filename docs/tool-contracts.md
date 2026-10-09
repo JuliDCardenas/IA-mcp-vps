@@ -90,3 +90,26 @@ El subsistema expone 12 herramientas integradas para trabajos de auditoría e im
     - Por defecto rechaza worktrees sucios, cambios no publicados y trabajos activos.
     - Con `confirm_discard_unpublished=true`, permite descarte forzado exclusivamente para estados terminales `CANCELLED` o `FAILED`.
     - Preserva el repositorio bare base y worktrees hermanos.
+
+## Entorno de contenedores
+
+- `discover_containers`: Inspección limitada y de solo lectura de la API Docker para retornar candidatos. Devuelve atributos seguros sin exponer mounts, paths, environment ni outputs de error en crudo.
+- `discover_compose_projects`: Localiza metadatos de configuración en rutas seguras (`docker-compose.yml`, etc). Aplica restricciones completas de paths (denied files, limites de tamaño).
+- `discover_http_targets`: Proyecta servicios HTTP probables. Identifica destinos de forma segura, diferenciando puertos mapeados de puertos privados inalcanzables. No ejecuta pruebas de red a nuevos puertos no publicados.
+- `suggest_allowlist_updates`: Compara la lista de configuración (`allowlists`) con los componentes descubiertos y genera fragmentos en YAML de validación manual para actualización segura de dependencias. Nunca altera ni reinicia servicios por sí mismo.
+
+### Límites Finitos
+
+Todos los endpoints de descubrimiento aplican límites de seguridad robustos:
+- Las llamadas que devuelven listas aplican un límite estricto de elementos a devolver (`limit = max(1, min(limit, 100))`). Incluyen un atributo booleano global `truncated` indicando si los resultados fueron limitados.
+- Adicionalmente el escáner del `docker-compose.yml` retorna un atributo `metadata_truncated` por proyecto individual, indicando si los resultados de los `services`, `networks` o `volumes` excedieron el máximo configurado por el agregador (20).
+- El descubrimiento de metadatos mediante `os.walk` implementa un presupuesto máximo de inspección estricto de 200 directorios visitados antes de detenerse y devolver resultados parciales (`truncated = True`).
+- Las lecturas de los archivos (ej. metadatos en YAML) evalúan la restricción `max_file_bytes` de la configuración antes de la lectura.
+
+### Despliegue Manual y Recuperación (Revert)
+
+Estas herramientas solo son de propósito de **visualización y descubrimiento**. Para llevar a cabo un despliegue de las sugerencias devueltas:
+
+1. **Aprobación manual:** Un administrador deberá leer y validar manualmente el bloque en formato YAML emitido por `suggest_allowlist_updates`.
+2. **Aplicar cambios:** Copiar las reglas deseadas (contenedores permitidos, proyectos permitidos, objetivos HTTP) al archivo `config.yaml` o entorno equivalente desplegado.
+3. **Revertir:** En caso de que se presente alguna regresión u operación no esperada debido a las nuevas reglas permitidas, la recuperación se logrará mediante la eliminación estricta y manual de dichas reglas desde el archivo de configuración afectado, seguido de un reinicio completo de las herramientas (`systemctl restart ia-mcp-vps` o el reinicio del contenedor).
