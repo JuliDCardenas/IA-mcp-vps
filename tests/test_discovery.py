@@ -51,6 +51,18 @@ def registered_tools(mock_app_config):
     register_discovery_tools(mcp, config)
     return mcp.tools
 
+
+@patch('dari_mcp_vps.tools.discovery._json')
+def test_docker_error_leakage(mock_json, registered_tools):
+    mock_json.side_effect = Exception("FAKE_SECRET_IN_DOCKER_BODY")
+    discover_containers = registered_tools["discover_containers"]
+
+    res = discover_containers()
+    assert res["ok"] is False
+    assert "FAKE_SECRET_IN_DOCKER_BODY" not in res.get("error", "")
+    assert "DOCKER_API_ERROR" in res.get("error", "")
+
+
 def test_tool_annotations(registered_tools):
     for name, func in registered_tools.items():
         assert func.annotations.get("readOnlyHint") is True, f"Tool {name} must have readOnlyHint=True"
@@ -105,6 +117,21 @@ def test_discover_http_targets(mock_json, registered_tools):
     assert res["candidates"][0]["container_name"] == "web-app"
     assert res["candidates"][0]["port"] == 8080
     assert "manual_verification_required" in res["candidates"][0]
+
+
+def test_compose_yaml_error_leakage(registered_tools, mock_app_config):
+    _, scope_dir = mock_app_config
+    valid_yml = scope_dir / "docker-compose.yml"
+    valid_yml.write_text("services:\n  web: [FAKE_SECRET_IN_INVALID_YAML\n")
+
+    discover_compose_projects = registered_tools["discover_compose_projects"]
+    res = discover_compose_projects()
+
+    assert res["ok"] is True
+    assert res["partial_failure"] is True
+    assert any("YAML_PARSE_ERROR" in err for err in res["errors"])
+    assert not any("FAKE_SECRET_IN_INVALID_YAML" in err for err in res["errors"])
+
 
 def test_discover_compose_projects(registered_tools, mock_app_config):
     _, scope_dir = mock_app_config
@@ -176,3 +203,27 @@ def test_suggest_allowlist_updates(mock_json, registered_tools, mock_app_config)
 
     assert "new_app" in parsed["allowed_compose_projects"]
     assert parsed["allowed_compose_projects"]["new_app"]["path"] == str(valid_yml.resolve())
+
+
+@patch('dari_mcp_vps.tools.discovery._json')
+def test_discover_http_targets_internal_udp(mock_json, registered_tools):
+    mock_json.return_value = [
+        {
+            "Names": ["/udp-app"],
+            "Ports": [{"PrivatePort": 80, "Type": "udp"}]
+        },
+        {
+            "Names": ["/internal-web"],
+            "Ports": [{"PrivatePort": 443, "Type": "tcp"}]
+        }
+    ]
+    discover_http_targets = registered_tools["discover_http_targets"]
+    res = discover_http_targets()
+
+    # UDP should be ignored. Internal-web should be marked unpublished.
+    assert res["ok"] is True
+    candidates = res["candidates"]
+    assert len(candidates) == 1
+    assert candidates[0]["container_name"] == "internal-web"
+    assert candidates[0]["published"] is False
+    assert candidates[0]["ip"] == "private/unreachable"
