@@ -45,6 +45,56 @@ class AppConfig:
     def n8n_webhook_key(self):
         return os.getenv('N8N_WEBHOOK_KEY', self.raw.get('jules', {}).get('n8n_webhook_key', ''))
 
+    @property
+    def approval_enabled(self):
+        # Strictly check the os.environ so it cannot be enabled by yaml without explicitly configuring env
+        enabled = str(os.getenv('APPROVAL_ENABLED', 'false')).lower() == 'true'
+        if enabled:
+            import urllib.parse
+            import re
+
+            # Require exact strings for auth
+            if not self.approval_webhook_secret or not self.approval_n8n_webhook_key:
+                return False
+
+            # Strictly validate numeric Telegram IDs
+            if not re.match(r'^-?\d+$', self.approval_telegram_user_id) or not re.match(r'^-?\d+$', self.approval_telegram_chat_id):
+                return False
+
+            # Strictly validate HTTPS URL structure
+            try:
+                parsed = urllib.parse.urlparse(self.approval_n8n_webhook_url)
+                if parsed.scheme != "https" or not parsed.netloc:
+                    return False
+            except Exception:
+                return False
+
+        return enabled
+
+    @property
+    def approval_db_path(self):
+        return os.getenv('APPROVAL_DB_PATH', self.raw.get('approvals', {}).get('db_path', '/var/lib/coding-jobs/approvals.db'))
+
+    @property
+    def approval_n8n_webhook_url(self):
+        return os.getenv('APPROVAL_N8N_WEBHOOK_URL', self.raw.get('approvals', {}).get('n8n_webhook_url', ''))
+
+    @property
+    def approval_n8n_webhook_key(self):
+        return os.getenv('APPROVAL_N8N_WEBHOOK_KEY', '')
+
+    @property
+    def approval_webhook_secret(self):
+        return os.getenv('APPROVAL_WEBHOOK_SECRET', '')
+
+    @property
+    def approval_telegram_user_id(self):
+        return os.getenv('APPROVAL_TELEGRAM_USER_ID', '')
+
+    @property
+    def approval_telegram_chat_id(self):
+        return os.getenv('APPROVAL_TELEGRAM_CHAT_ID', '')
+
 def load_config(path=None):
     p = Path(path or os.getenv('IA_MCP_VPS_CONFIG', 'config.yaml')).expanduser().resolve()
     if not p.exists():
