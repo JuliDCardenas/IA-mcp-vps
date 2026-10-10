@@ -107,13 +107,15 @@ class AppConfig:
     def docker_blacklist(self):
         bl = self.raw.get('security', {}).get('docker_blacklist', {})
         if not isinstance(bl, dict):
-            return {"read_excludes": [], "mutate_excludes": []}
+            raise ValueError("docker_blacklist must be a dictionary")
 
         read_exc = bl.get('read_excludes', [])
         mutate_exc = bl.get('mutate_excludes', [])
 
-        if not isinstance(read_exc, list): read_exc = []
-        if not isinstance(mutate_exc, list): mutate_exc = []
+        if not isinstance(read_exc, list) or any(not isinstance(i, str) or not i.strip() for i in read_exc):
+            raise ValueError("docker_blacklist.read_excludes must be a list of non-empty strings")
+        if not isinstance(mutate_exc, list) or any(not isinstance(i, str) or not i.strip() for i in mutate_exc):
+            raise ValueError("docker_blacklist.mutate_excludes must be a list of non-empty strings")
 
         return {
             "read_excludes": read_exc,
@@ -124,13 +126,22 @@ class AppConfig:
     def files_blacklist(self):
         bl = self.raw.get('security', {}).get('files_blacklist', {})
         if not isinstance(bl, dict):
-            return {"managed_roots": [], "file_excludes": []}
+            raise ValueError("files_blacklist must be a dictionary")
 
         roots = bl.get('managed_roots', [])
         excludes = bl.get('file_excludes', [])
 
-        if not isinstance(roots, list): roots = []
-        if not isinstance(excludes, list): excludes = []
+        if not isinstance(roots, list) or any(not isinstance(i, str) or not i.strip() for i in roots):
+            raise ValueError("files_blacklist.managed_roots must be a list of non-empty strings")
+        if not isinstance(excludes, list) or any(not isinstance(i, str) or not i.strip() for i in excludes):
+            raise ValueError("files_blacklist.file_excludes must be a list of non-empty strings")
+
+        for r in roots:
+            import os
+            from pathlib import Path
+            p = Path(r).resolve()
+            if str(p) == "/" or str(p) == "":
+                raise ValueError(f"Managed root cannot be the root filesystem: {r}")
 
         return {
             "managed_roots": roots,

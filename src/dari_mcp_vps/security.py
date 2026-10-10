@@ -12,12 +12,14 @@ def is_denied_path(config, path: Path):
     mode = config.get('security', {}).get('mode', 'legacy')
 
     if mode == 'blacklist':
-        bl = config.get('security', {}).get('files_blacklist', {})
-        if not isinstance(bl, dict):
-            bl = {}
-        excludes = bl.get('file_excludes', [])
-        if not isinstance(excludes, list):
-            excludes = []
+        from dari_mcp_vps.config import AppConfig
+        try:
+            app_config = AppConfig(config, None)
+            bl = app_config.files_blacklist
+        except ValueError as e:
+            raise SecurityError(f"Invalid security configuration: {e}")
+
+        excludes = bl['file_excludes']
 
         default_excludes = ['.ssh', '.local', '.config', '.env*', '*.key', '*.pem', 'approvals.db', 'jules_jobs.db']
         all_excludes = excludes + default_excludes
@@ -45,12 +47,14 @@ def resolve_allowed_path(config, scope, relative_path='.'):
     mode = config.get('security', {}).get('mode', 'legacy')
 
     if mode == 'blacklist':
-        bl = config.get('security', {}).get('files_blacklist', {})
-        if not isinstance(bl, dict):
-            bl = {}
-        managed_roots = bl.get('managed_roots', [])
-        if not isinstance(managed_roots, list):
-            managed_roots = []
+        from dari_mcp_vps.config import AppConfig
+        try:
+            app_config = AppConfig(config, None)
+            bl = app_config.files_blacklist
+        except ValueError as e:
+            raise SecurityError(f"Invalid security configuration: {e}")
+
+        managed_roots = bl['managed_roots']
 
         scopes = config.get('allowed_paths', {})
 
@@ -66,7 +70,7 @@ def resolve_allowed_path(config, scope, relative_path='.'):
                      break
 
              if not root:
-                 # Check if scope matches a path under a managed root
+                 # Check if scope is a valid path under a managed root
                  for r in managed_roots:
                      r_path = Path(r).expanduser().resolve()
                      try:
@@ -76,6 +80,15 @@ def resolve_allowed_path(config, scope, relative_path='.'):
                              break
                      except Exception:
                          pass
+
+             if not root:
+                 # Fallback: Treat scope as a directory name inside the managed roots
+                 for r in managed_roots:
+                     r_path = Path(r).expanduser().resolve()
+                     potential_root = (r_path / scope).resolve()
+                     if potential_root.is_relative_to(r_path) and potential_root.is_dir():
+                         root = potential_root
+                         break
 
         if not root:
             raise SecurityError(f'Scope not allowed or not in managed roots: {scope}')
@@ -98,7 +111,7 @@ def resolve_allowed_path(config, scope, relative_path='.'):
             raise SecurityError(f'Scope not allowed: {scope}')
         root = Path(scopes[scope]['root']).expanduser().resolve()
         candidate = (root / relative_path).resolve()
-        if not str(candidate).startswith(str(root)):
+        if not candidate.is_relative_to(root):
             raise SecurityError('Path escapes allowed root')
         if is_denied_path(config, candidate):
             raise SecurityError('Path is denied')

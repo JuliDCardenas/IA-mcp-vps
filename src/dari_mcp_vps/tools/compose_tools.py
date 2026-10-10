@@ -30,17 +30,27 @@ def _compose_path(config: dict[str, Any], project: str) -> Path:
     if mode == 'blacklist':
         p_cfg = _project_config(config, project)
         if "implicit" in p_cfg:
-             from dari_mcp_vps.security import resolve_allowed_path
-             try:
-                 path = resolve_allowed_path(config, project, "docker-compose.yml")
-             except Exception:
-                 try:
-                     path = resolve_allowed_path(config, project, "compose.yaml")
-                 except Exception:
-                     raise SecurityError(f"Compose project not found in managed roots: {project}")
+             from dari_mcp_vps.security import SecurityError, resolve_allowed_path
+             path = None
 
-             if not path.exists():
-                  raise FileNotFoundError(str(path))
+             try:
+                 candidate = resolve_allowed_path(config, project, "docker-compose.yml")
+                 if candidate.exists():
+                     path = candidate
+             except Exception:
+                 pass
+
+             if not path:
+                 try:
+                     candidate = resolve_allowed_path(config, project, "compose.yaml")
+                     if candidate.exists():
+                         path = candidate
+                 except Exception:
+                     pass
+
+             if not path:
+                 raise SecurityError(f"Compose project file not found or not allowed in managed roots: {project}")
+
              return path
 
     value = _project_config(config, project).get("path")
@@ -120,11 +130,17 @@ def register_compose_tools(mcp: Any, app_config: Any) -> None:
         project_cfg = _project_config(app_config.raw, project)
         containers = _containers_for_project(project, project_cfg)
 
-        from dari_mcp_vps.security import assert_docker_permission
+        from dari_mcp_vps.security import assert_docker_permission, SecurityError
+        allowed_containers = []
         for c in containers:
-            assert_docker_permission(app_config.raw, c, 'read')
+            try:
+                assert_docker_permission(app_config.raw, c, 'read')
+                allowed_containers.append(c)
+            except SecurityError:
+                pass
+
         rows = []
-        for c in containers:
+        for c in allowed_containers:
             labels = c.get("Labels") or {}
             rows.append({
                 "name": _container_name(c),
@@ -148,9 +164,16 @@ def register_compose_tools(mcp: Any, app_config: Any) -> None:
                 raise SecurityError(f"Compose service not allowed for {project}: {service}")
         containers = _containers_for_project(project, project_cfg)
 
-        from dari_mcp_vps.security import assert_docker_permission
+        from dari_mcp_vps.security import assert_docker_permission, SecurityError
+        allowed_containers = []
         for c in containers:
-            assert_docker_permission(app_config.raw, c, 'read')
+            try:
+                assert_docker_permission(app_config.raw, c, 'read')
+                allowed_containers.append(c)
+            except SecurityError:
+                pass
+
+        containers = allowed_containers
         if service:
             containers = [c for c in containers if (c.get("Labels") or {}).get("com.docker.compose.service") == service or service in [str(n).lstrip("/") for n in c.get("Names", [])]]
         tail = min(max(1, int(lines)), app_config.max_log_lines)

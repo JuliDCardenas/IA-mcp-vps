@@ -121,6 +121,16 @@ def register_docker_tools(mcp: Any, app_config: Any) -> None:
     def docker_ps() -> list[dict[str, Any]]:
         """List Docker containers via Docker socket; no docker CLI required."""
         containers = _json("GET", "/containers/json?all=1")
+
+        from dari_mcp_vps.security import assert_docker_permission, SecurityError
+        allowed_containers = []
+        for c in containers:
+            try:
+                assert_docker_permission(app_config.raw, c, 'read')
+                allowed_containers.append(c)
+            except SecurityError:
+                pass
+
         return [
             {
                 "name": _container_name(c),
@@ -185,6 +195,8 @@ def register_docker_tools(mcp: Any, app_config: Any) -> None:
         """Return recent logs for an allowed Docker container."""
         assert_allowed_name(app_config.raw, "allowed_containers", container)
         target = _find_container(container)
+        from dari_mcp_vps.security import assert_docker_permission
+        assert_docker_permission(app_config.raw, target, 'read')
         cid = target.get("Id")
         tail = min(max(1, int(lines)), app_config.max_log_lines)
         path = f"/containers/{cid}/logs?stdout=1&stderr=1&timestamps=1&tail={tail}"
@@ -204,6 +216,8 @@ def register_docker_tools(mcp: Any, app_config: Any) -> None:
         """Return recent allowed-container logs with optional grep and since timestamp/seconds."""
         assert_allowed_name(app_config.raw, "allowed_containers", container)
         target = _find_container(container)
+        from dari_mcp_vps.security import assert_docker_permission
+        assert_docker_permission(app_config.raw, target, 'read')
         cid = target.get("Id")
         tail = min(max(1, int(lines)), app_config.max_log_lines)
         params = {"stdout": "1", "stderr": "1", "timestamps": "1", "tail": str(tail)}
@@ -245,10 +259,18 @@ def register_docker_tools(mcp: Any, app_config: Any) -> None:
             raise RuntimeError(f"Container '{container}' is not an authorized target for docker_restart.")
         cid = target.get("Id")
         inspect_data = _json("GET", f"/containers/{cid}/json")
+        import hashlib, json
+
+        # Digest the relevant blacklist configuration to prevent execution if policy changes
+        bl = app_config.docker_blacklist
+        policy_string = json.dumps({"read": sorted(bl["read_excludes"]), "mutate": sorted(bl["mutate_excludes"])})
+        policy_digest = hashlib.sha256(policy_string.encode('utf-8')).hexdigest()
+
         snapshot = {
             "Id": inspect_data.get("Id"),
             "Image": inspect_data.get("Config", {}).get("Image"),
-            "StartedAt": inspect_data.get("State", {}).get("StartedAt")
+            "StartedAt": inspect_data.get("State", {}).get("StartedAt"),
+            "PolicyDigest": policy_digest
         }
 
         if policy["requires_approval"]:
@@ -299,15 +321,27 @@ def execute_docker_restart(parameters: Dict[str, Any], app_config: Any) -> Tuple
 
         cid = target.get("Id")
         inspect_data = _json("GET", f"/containers/{cid}/json")
+        import hashlib, json
+
+        bl = app_config.docker_blacklist
+        policy_string = json.dumps({"read": sorted(bl["read_excludes"]), "mutate": sorted(bl["mutate_excludes"])})
+        policy_digest = hashlib.sha256(policy_string.encode('utf-8')).hexdigest()
+
         current_snapshot = {
             "Id": inspect_data.get("Id"),
             "Image": inspect_data.get("Config", {}).get("Image"),
-            "StartedAt": inspect_data.get("State", {}).get("StartedAt")
+            "StartedAt": inspect_data.get("State", {}).get("StartedAt"),
         }
+        # Safely include PolicyDigest if it was in the original request (migration compatibility)
+        if "PolicyDigest" in expected_snapshot:
+            current_snapshot["PolicyDigest"] = policy_digest
+
     except RuntimeError as e:
         return False, {"error": f"Failed to fetch container state before execution: {e}"}
 
     if expected_snapshot != current_snapshot:
+        if "PolicyDigest" in expected_snapshot and expected_snapshot["PolicyDigest"] != policy_digest:
+             return False, {"error": "Precondition failed: Security policy has changed since approval."}
         return False, {"error": "Precondition failed: Container identity or state has changed since approval."}
 
     # POST to socket
