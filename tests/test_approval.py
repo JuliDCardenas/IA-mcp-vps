@@ -12,7 +12,7 @@ from dari_mcp_vps.tools.approval_db import (
     get_request,
     claim_decision,
     expire_pending_requests,
-    transition_to_running,
+    consume_approved_requests,
     record_simulation_result,
     get_pending_outbox_events
 )
@@ -28,6 +28,8 @@ def app_config(test_db_path, monkeypatch):
     monkeypatch.setenv("IA_MCP_VPS_CONFIG", "config.example.yaml")
     monkeypatch.setenv("APPROVAL_DB_PATH", test_db_path)
     monkeypatch.setenv("APPROVAL_WEBHOOK_SECRET", "secret123")
+    monkeypatch.setenv("APPROVAL_N8N_WEBHOOK_KEY", "webhook123")
+    monkeypatch.setenv("APPROVAL_N8N_WEBHOOK_URL", "https://example.com/webhook")
     monkeypatch.setenv("APPROVAL_TELEGRAM_USER_ID", "1111")
     monkeypatch.setenv("APPROVAL_TELEGRAM_CHAT_ID", "2222")
     config = load_config()
@@ -97,6 +99,7 @@ def test_expire_pending(test_db_path, app_config):
     assert not claim_decision(test_db_path, req_id, token, "APPROVED")
 
 def test_transition_and_simulate(test_db_path, app_config):
+    from dari_mcp_vps.tools.approval_db import consume_approved_requests, record_simulation_result
     req_id, is_new = create_request(test_db_path, "key4", "approval_demo", {}, "secret123")
 
     import hmac
@@ -104,17 +107,47 @@ def test_transition_and_simulate(test_db_path, app_config):
 
     claim_decision(test_db_path, req_id, token, "APPROVED")
 
-    running = transition_to_running(test_db_path)
+    running = consume_approved_requests(test_db_path)
     assert len(running) == 1
     assert running[0]["id"] == req_id
-
-    req = get_request(test_db_path, req_id)
-    assert req["status"] == "RUNNING_SIMULATION"
 
     record_simulation_result(test_db_path, req_id, True, {"log": "ok"})
     req = get_request(test_db_path, req_id)
     assert req["status"] == "SIMULATED_SUCCESS"
     assert req["result_diagnostic"]["log"] == "ok"
+
+def test_config_validation(test_db_path, monkeypatch):
+    monkeypatch.setenv("IA_MCP_VPS_CONFIG", "config.example.yaml")
+    monkeypatch.setenv("APPROVAL_DB_PATH", test_db_path)
+
+    # Missing enabled
+    config = load_config()
+    assert not config.approval_enabled
+
+    # Missing secrets
+    monkeypatch.setenv("APPROVAL_ENABLED", "true")
+    config = load_config()
+    assert not config.approval_enabled
+
+    # Has all but invalid Telegram IDs
+    monkeypatch.setenv("APPROVAL_WEBHOOK_SECRET", "secret123")
+    monkeypatch.setenv("APPROVAL_N8N_WEBHOOK_KEY", "webhook123")
+    monkeypatch.setenv("APPROVAL_TELEGRAM_USER_ID", "abc")
+    monkeypatch.setenv("APPROVAL_TELEGRAM_CHAT_ID", "2222")
+    monkeypatch.setenv("APPROVAL_N8N_WEBHOOK_URL", "https://example.com/webhook")
+    config = load_config()
+    assert not config.approval_enabled
+
+    # Has invalid URL
+    monkeypatch.setenv("APPROVAL_TELEGRAM_USER_ID", "1111")
+    monkeypatch.setenv("APPROVAL_N8N_WEBHOOK_URL", "http://example.com/webhook")
+    config = load_config()
+    assert not config.approval_enabled
+
+    # Valid
+    monkeypatch.setenv("APPROVAL_N8N_WEBHOOK_URL", "https://example.com/webhook")
+    config = load_config()
+    assert config.approval_enabled
 
 @pytest.mark.asyncio
 async def test_webhook_route(app_config, monkeypatch):

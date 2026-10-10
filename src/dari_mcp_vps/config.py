@@ -50,12 +50,25 @@ class AppConfig:
         # Strictly check the os.environ so it cannot be enabled by yaml without explicitly configuring env
         enabled = str(os.getenv('APPROVAL_ENABLED', 'false')).lower() == 'true'
         if enabled:
-            # Validate hard requirements for enabled
-            if not self.approval_webhook_secret or not self.approval_telegram_user_id or not self.approval_telegram_chat_id:
+            import urllib.parse
+            import re
+
+            # Require exact strings for auth
+            if not self.approval_webhook_secret or not self.approval_n8n_webhook_key:
                 return False
-            # Require HTTPS
-            if not self.approval_n8n_webhook_url or not self.approval_n8n_webhook_url.startswith("https://"):
+
+            # Strictly validate numeric Telegram IDs
+            if not re.match(r'^-?\d+$', self.approval_telegram_user_id) or not re.match(r'^-?\d+$', self.approval_telegram_chat_id):
                 return False
+
+            # Strictly validate HTTPS URL structure
+            try:
+                parsed = urllib.parse.urlparse(self.approval_n8n_webhook_url)
+                if parsed.scheme != "https" or not parsed.netloc:
+                    return False
+            except Exception:
+                return False
+
         return enabled
 
     @property

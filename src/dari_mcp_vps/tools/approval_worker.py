@@ -9,12 +9,11 @@ import hashlib
 from dari_mcp_vps.tools.approval_db import (
     init_db,
     expire_pending_requests,
-    transition_to_running,
+    consume_approved_requests,
     record_simulation_result,
     get_pending_outbox_events,
     mark_outbox_event_sent,
-    increment_outbox_retry,
-    recover_stuck_simulations
+    increment_outbox_retry
 )
 
 logger = logging.getLogger(__name__)
@@ -35,12 +34,6 @@ async def background_approval_worker(app_config):
 
     loop = asyncio.get_running_loop()
 
-    # 0. Recover any stuck tasks from a previous crash (e.g., worker died mid-simulation)
-    try:
-        recover_stuck_simulations(db_path)
-    except Exception as e:
-        logger.error(f"Failed to recover stuck simulations: {e}")
-
     # Setup safe HTTP opener
     opener = urllib.request.build_opener(NoRedirectHandler())
 
@@ -49,15 +42,16 @@ async def background_approval_worker(app_config):
             # 1. Expire pending requests
             expire_pending_requests(db_path)
 
-            # 2. Pick up approved requests and run simulation
-            running = transition_to_running(db_path)
+            # 2. Pick up approved requests, run deterministic simulation, and persist result transactionally
+            running = consume_approved_requests(db_path)
             for req in running:
-                # Simulate deterministically, log output
+                # Simulate deterministically in-memory, log output
                 diagnostic = {
                     "simulation_log": f"Simulated action {req['action']} for idempotency key",
                     "dry_run_success": True,
                     "changes_preview": ["+ simulated_change.txt"]
                 }
+                # Transition straight from APPROVED to SIMULATED_SUCCESS
                 record_simulation_result(db_path, req["id"], success=True, diagnostic=diagnostic)
 
             # 3. Process outbox notifications

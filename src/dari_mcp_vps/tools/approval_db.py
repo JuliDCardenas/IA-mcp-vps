@@ -262,7 +262,7 @@ def recover_stuck_simulations(db_path: str, timeout_seconds: int = 60) -> None:
                 """, (event_id, req_id, event_payload, now.isoformat(), now.isoformat()))
         conn.commit()
 
-def transition_to_running(db_path: str) -> list[Dict[str, Any]]:
+def consume_approved_requests(db_path: str) -> list[Dict[str, Any]]:
     """Returns a list of requests that were just moved to RUNNING_SIMULATION."""
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
