@@ -30,7 +30,7 @@ def register_approval_tools(mcp: FastMCP, app_config):
             return {"error": "Approval system is not configured"}
 
         try:
-            req_id, token_status = create_request(
+            req_id, is_new = create_request(
                 db_path,
                 idempotency_key,
                 action,
@@ -40,7 +40,7 @@ def register_approval_tools(mcp: FastMCP, app_config):
 
             return {
                 "request_id": req_id,
-                "status": "PENDING" if token_status != "ALREADY_EXISTS" else "ALREADY_EXISTS_CHECK_STATUS",
+                "status": "PENDING" if is_new else "ALREADY_EXISTS_CHECK_STATUS",
                 "message": "Approval request recorded. Waiting for decision."
             }
         except ValueError as e:
@@ -142,6 +142,12 @@ def register_approval_tools(mcp: FastMCP, app_config):
             request_id = body.get("request_id")
             capability_token = body.get("capability_token")
             decision = body.get("decision")
+
+            # Validate types and bounds
+            if not isinstance(user_id, (str, int)) or not isinstance(chat_id, (str, int)):
+                return JSONResponse({"error": "Invalid ID types"}, status_code=400)
+            if not isinstance(request_id, str) or not isinstance(capability_token, str) or len(capability_token) > 64:
+                return JSONResponse({"error": "Invalid tokens"}, status_code=400)
 
             # Validate user identity strictly
             if str(user_id) != app_config.approval_telegram_user_id or str(chat_id) != app_config.approval_telegram_chat_id:

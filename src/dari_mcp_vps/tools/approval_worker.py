@@ -14,7 +14,7 @@ from dari_mcp_vps.tools.approval_db import (
     get_pending_outbox_events,
     mark_outbox_event_sent,
     increment_outbox_retry,
-    reset_stuck_simulations
+    recover_stuck_simulations
 )
 
 logger = logging.getLogger(__name__)
@@ -35,11 +35,11 @@ async def background_approval_worker(app_config):
 
     loop = asyncio.get_running_loop()
 
-    # 0. Recover any stuck tasks from a previous crash
+    # 0. Recover any stuck tasks from a previous crash (e.g., worker died mid-simulation)
     try:
-        reset_stuck_simulations(db_path)
+        recover_stuck_simulations(db_path)
     except Exception as e:
-        logger.error(f"Failed to reset stuck simulations: {e}")
+        logger.error(f"Failed to recover stuck simulations: {e}")
 
     # Setup safe HTTP opener
     opener = urllib.request.build_opener(NoRedirectHandler())

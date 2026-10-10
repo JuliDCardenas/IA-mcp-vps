@@ -36,7 +36,7 @@ def app_config(test_db_path, monkeypatch):
 
 def test_create_and_get_request(test_db_path, app_config):
     params = {"target": "foo"}
-    req_id = create_request(test_db_path, "key1", "approval_demo", params, "secret123")
+    req_id, is_new = create_request(test_db_path, "key1", "approval_demo", params, "secret123")
 
     assert req_id.startswith("a_")
 
@@ -48,10 +48,10 @@ def test_create_and_get_request(test_db_path, app_config):
 
 def test_idempotency(test_db_path, app_config):
     params = {"target": "foo"}
-    req_id1 = create_request(test_db_path, "key1", "approval_demo", params, "secret123")
+    req_id1, is_new1 = create_request(test_db_path, "key1", "approval_demo", params, "secret123")
 
     # Same key and params -> should return existing
-    req_id2 = create_request(test_db_path, "key1", "approval_demo", params, "secret123")
+    req_id2, is_new2 = create_request(test_db_path, "key1", "approval_demo", params, "secret123")
 
     assert req_id1 == req_id2
 
@@ -60,7 +60,7 @@ def test_idempotency(test_db_path, app_config):
         create_request(test_db_path, "key1", "approval_demo", {"target": "bar"}, "secret123")
 
 def test_claim_decision(test_db_path, app_config):
-    req_id = create_request(test_db_path, "key2", "approval_demo", {}, "secret123")
+    req_id, is_new = create_request(test_db_path, "key2", "approval_demo", {}, "secret123")
 
     # We must compute the capability correctly to claim it
     import hmac
@@ -83,7 +83,7 @@ def test_expire_pending(test_db_path, app_config):
     now = datetime.datetime.now(datetime.timezone.utc)
 
     # Create in the past by passing a negative TTL
-    req_id = create_request(test_db_path, "key3", "approval_demo", {}, "secret123", ttl_seconds=-10)
+    req_id, is_new = create_request(test_db_path, "key3", "approval_demo", {}, "secret123", ttl_seconds=-10)
 
     import hmac
     token = hmac.new(b"secret123", req_id.encode('utf-8'), hashlib.sha256).hexdigest()[:24]
@@ -97,7 +97,7 @@ def test_expire_pending(test_db_path, app_config):
     assert not claim_decision(test_db_path, req_id, token, "APPROVED")
 
 def test_transition_and_simulate(test_db_path, app_config):
-    req_id = create_request(test_db_path, "key4", "approval_demo", {}, "secret123")
+    req_id, is_new = create_request(test_db_path, "key4", "approval_demo", {}, "secret123")
 
     import hmac
     token = hmac.new(b"secret123", req_id.encode('utf-8'), hashlib.sha256).hexdigest()[:24]
@@ -117,18 +117,18 @@ def test_transition_and_simulate(test_db_path, app_config):
     assert req["result_diagnostic"]["log"] == "ok"
 
 @pytest.mark.asyncio
-async def test_webhook_route(app_config):
+async def test_webhook_route(app_config, monkeypatch):
     from starlette.testclient import TestClient
     from starlette.applications import Starlette
     from starlette.routing import Route
 
-    os.environ["APPROVAL_ENABLED"] = "true"
-    os.environ["APPROVAL_WEBHOOK_SECRET"] = "secret123"
-    os.environ["APPROVAL_TELEGRAM_USER_ID"] = "1111"
-    os.environ["APPROVAL_TELEGRAM_CHAT_ID"] = "2222"
-    os.environ["APPROVAL_N8N_WEBHOOK_URL"] = "https://example.com"
-    app_config.raw["approvals"] = {"enabled": "true"}
-    app_config.raw["approvals"]["webhook_secret"] = "secret123"
+    monkeypatch.setenv("APPROVAL_ENABLED", "true")
+    monkeypatch.setenv("APPROVAL_WEBHOOK_SECRET", "secret123")
+    monkeypatch.setenv("APPROVAL_TELEGRAM_USER_ID", "1111")
+    monkeypatch.setenv("APPROVAL_TELEGRAM_CHAT_ID", "2222")
+    monkeypatch.setenv("APPROVAL_N8N_WEBHOOK_URL", "https://example.com")
+
+    app_config.raw["approvals"] = {"enabled": "true", "webhook_secret": "secret123"}
 
     mcp = FastMCP("test")
     register_approval_tools(mcp, app_config)
@@ -143,9 +143,47 @@ async def test_webhook_route(app_config):
 
     client = TestClient(app)
 
-    req_id = create_request(app_config.approval_db_path, "key5", "approval_demo", {}, "secret123")
-    import hmac
-    token = hmac.new(b"secret123", req_id.encode('utf-8'), hashlib.sha256).hexdigest()[:24]
+    # Create via actual Tool Call
+    # Instead of digging into internals, just use the FastMCP method:
+    import inspect
+    tool = mcp.get_tool("approval_simulate_request")
+    if inspect.iscoroutine(tool):
+        tool = await tool
+
+    res = tool.fn(idempotency_key="key5", action="approval_demo", parameters={})
+    if inspect.iscoroutine(res):
+        res = await res
+
+    req_id = res["request_id"]
+
+    # Get the capability token (we need to trigger the worker loop manually since it's an isolated test)
+    from dari_mcp_vps.tools.approval_worker import background_approval_worker
+    import asyncio
+    import urllib.request
+
+    # Mock outbox sending to capture the request payload containing the token
+    captured_token = None
+    class MockOpener:
+        def open(self, req, timeout):
+            nonlocal captured_token
+            payload = json.loads(req.data.decode('utf-8'))
+            captured_token = payload.get("capability_token")
+            class MockResponse:
+                status = 200
+                def __enter__(self): return self
+                def __exit__(self, *args): pass
+            return MockResponse()
+
+    with patch("urllib.request.build_opener", return_value=MockOpener()):
+        worker_task = asyncio.create_task(background_approval_worker(app_config))
+        await asyncio.sleep(0.1) # Yield to worker
+        worker_task.cancel()
+
+    assert captured_token is not None
+
+    # List instead of dict payload
+    response = client.post("/webhook/approval-decision", json=[], headers={"Authorization": "Bearer secret123"})
+    assert response.status_code == 400
 
     # Missing auth
     response = client.post("/webhook/approval-decision", json={})
@@ -157,21 +195,28 @@ async def test_webhook_route(app_config):
 
     # Correct auth, wrong user
     response = client.post("/webhook/approval-decision",
-        json={"user_id": "999", "chat_id": "2222", "request_id": req_id, "capability_token": token, "decision": "APPROVED"},
+        json={"user_id": "999", "chat_id": "2222", "request_id": req_id, "capability_token": captured_token, "decision": "APPROVED"},
         headers={"Authorization": "Bearer secret123"}
     )
     assert response.status_code == 403
 
     # Correct auth, correct identity, invalid decision
     response = client.post("/webhook/approval-decision",
-        json={"user_id": "1111", "chat_id": "2222", "request_id": req_id, "capability_token": token, "decision": "MAYBE"},
+        json={"user_id": "1111", "chat_id": "2222", "request_id": req_id, "capability_token": captured_token, "decision": "MAYBE"},
+        headers={"Authorization": "Bearer secret123"}
+    )
+    assert response.status_code == 400
+
+    # Invalid payload token size
+    response = client.post("/webhook/approval-decision",
+        json={"user_id": "1111", "chat_id": "2222", "request_id": req_id, "capability_token": "A"*70, "decision": "APPROVED"},
         headers={"Authorization": "Bearer secret123"}
     )
     assert response.status_code == 400
 
     # Correct payload
     response = client.post("/webhook/approval-decision",
-        json={"user_id": "1111", "chat_id": "2222", "request_id": req_id, "capability_token": token, "decision": "APPROVED"},
+        json={"user_id": "1111", "chat_id": "2222", "request_id": req_id, "capability_token": captured_token, "decision": "APPROVED"},
         headers={"Authorization": "Bearer secret123"}
     )
     assert response.status_code == 200
@@ -179,3 +224,5 @@ async def test_webhook_route(app_config):
 
     req = get_request(app_config.approval_db_path, req_id)
     assert req["status"] == "APPROVED"
+
+    assert len(captured_token) <= 24

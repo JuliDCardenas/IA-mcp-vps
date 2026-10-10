@@ -53,8 +53,10 @@ def create_request(
     parameters: Dict[str, Any],
     app_secret: str,
     ttl_seconds: int = 300
-) -> str:
-    """Creates a new approval request or returns existing if idempotency key and digest match."""
+) -> Tuple[str, bool]:
+    """Creates a new approval request or returns existing if idempotency key and digest match.
+    Returns (request_id, is_new)
+    """
     now = datetime.datetime.now(datetime.timezone.utc)
     expires_at = now + datetime.timedelta(seconds=ttl_seconds)
 
@@ -94,7 +96,7 @@ def create_request(
                 conn.rollback()
                 raise ValueError("Idempotency conflict: parameters or action have changed for the same key.")
             conn.rollback()
-            return existing_id
+            return existing_id, False
 
         # Generate new (req_id max 12 chars to keep callback_data <= 64 bytes)
         req_id = f"a_{secrets.token_hex(4)}"
@@ -127,7 +129,7 @@ def create_request(
 
         conn.commit()
 
-        return req_id
+        return req_id, True
 
 def get_request(db_path: str, request_id: str) -> Optional[Dict[str, Any]]:
     with sqlite3.connect(db_path) as conn:
@@ -222,6 +224,42 @@ def expire_pending_requests(db_path: str) -> None:
             WHERE status = 'PENDING' AND expires_at < ?
         """, (now,))
 
+        conn.commit()
+
+def recover_stuck_simulations(db_path: str, timeout_seconds: int = 60) -> None:
+    """Marks simulations as failed if they have been running longer than the timeout without completion."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    threshold = (now - datetime.timedelta(seconds=timeout_seconds)).isoformat()
+
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+
+        # We can't strictly know when they transitioned, but since they have a PENDING expiration,
+        # we can fail anything that is RUNNING_SIMULATION whose created_at is old enough (or use another field).
+        # We'll add updated_at soon, but for now we'll fail anything that was created longer ago than TTL + timeout
+
+        # We fail RUNNING_SIMULATION if created_at is older than threshold. Since simulations take < 5 seconds,
+        # any created_at older than 60 seconds is definitely stuck.
+        cursor.execute("""
+            UPDATE approvals SET status = 'SIMULATED_FAILURE', result_diagnostic = '{"error": "Simulation worker crashed during execution"}'
+            WHERE status = 'RUNNING_SIMULATION' AND created_at < ?
+        """, (threshold,))
+
+        # Any that were successfully updated need outbox events
+        if cursor.rowcount > 0:
+            cursor.execute("SELECT id FROM approvals WHERE status = 'SIMULATED_FAILURE' AND result_diagnostic LIKE '%Simulation worker crashed%'")
+            for row in cursor.fetchall():
+                req_id = row[0]
+                event_id = str(uuid.uuid4())
+                event_payload = json.dumps({
+                    "request_id": req_id,
+                    "status": "SIMULATED_FAILURE",
+                    "diagnostic": {"error": "Simulation worker crashed during execution"}
+                })
+                cursor.execute("""
+                    INSERT INTO approval_outbox (event_id, request_id, event_type, payload, status, created_at, retries, next_attempt)
+                    VALUES (?, ?, 'SIMULATION_COMPLETED', ?, 'PENDING', ?, 0, ?)
+                """, (event_id, req_id, event_payload, now.isoformat(), now.isoformat()))
         conn.commit()
 
 def transition_to_running(db_path: str) -> list[Dict[str, Any]]:

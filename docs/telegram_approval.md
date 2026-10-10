@@ -21,9 +21,11 @@ Este documento describe la arquitectura central de almacenamiento y seguridad de
 - `APPROVAL_TELEGRAM_USER_ID`: Tu ID numérico de Telegram (solo tú puedes aprobar).
 - `APPROVAL_TELEGRAM_CHAT_ID`: ID del chat donde opera el bot.
 
-## Contratos de Integración (Futuro N8N, JSON Schemas)
+## Contratos de Integración N8N
 
-La implementación n8n no está incluida en esta entrega, pero deberá respetar estos contratos.
+El webhook n8n utilizará nativamente la funcionalidad **"Telegram Send and Wait for Response"**. El MCP enviará un token efímero que n8n conservará en memoria y devolverá en su flujo de continuación (ej. Approve Within Chat).
+
+*No es necesario* ensamblar un `callback_data` propio de Telegram ni entregarle a n8n el secreto maestro del servidor. N8n solo pasa los datos.
 
 ### 1. Payload Saliente (A N8N)
 ```json
@@ -36,7 +38,7 @@ La implementación n8n no está incluida en esta entrega, pero deberá respetar 
   "capability_token": "hmac_token_24_chars"
 }
 ```
-*(Nota: N8N deberá componer la UI de botones utilizando su propia configuración. El `capability_token` se genera dinámicamente en el envío HTTP y se incluye en el payload para que n8n ensamble el callback_data <= 64 bytes. NUNCA se persiste en texto plano en la base de datos).*
+*(Nota: El `capability_token` se genera dinámicamente en el envío HTTP y NUNCA se persiste en texto plano en la base de datos local).*
 
 ### 2. Payload Entrante (Desde N8N a MCP)
 Endpoint: `POST /webhook/approval-decision`
