@@ -42,6 +42,10 @@ EXPECTED_CLASSIFICATION = {
     "coding_job_cleanup": False,
     "coding_private_job_create": False,
 
+    "approval_simulate_request": False,
+    "approval_status": True,
+    "approval_wait": True,
+
     "jules_request_coding_task": False,
     "jules_reply_to_task": False,
     "jules_check_task_status": False,
@@ -91,6 +95,10 @@ EXPECTED_TAGS = {
     "coding_job_cancel": "agy",
     "coding_job_cleanup": "agy",
     "coding_private_job_create": "agy",
+
+    "approval_simulate_request": "agy",
+    "approval_status": "agy",
+    "approval_wait": "agy",
 
     "jules_request_coding_task": "jules",
     "jules_reply_to_task": "jules",
