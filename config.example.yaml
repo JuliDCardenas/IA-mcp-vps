@@ -10,7 +10,10 @@ allowed_containers:
   - homepage
 
 allowed_http_targets:
-  homepage_local: "http://host.docker.internal:3001"
+  homepage_local:
+    url: "http://host.docker.internal:3001"
+    headers:
+      Host: "julidcardenas.site"
 
 tools:
   docker_restart:

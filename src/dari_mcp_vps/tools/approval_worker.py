@@ -52,11 +52,33 @@ async def background_approval_worker(app_config):
                 handler = get_handler(action)
 
                 if handler:
+                    from dari_mcp_vps.tools.action_dispatcher import IndeterminateStateError
                     try:
                         success, diagnostic = handler(req["parameters"], app_config)
+                        record_execution_result(db_path, req["id"], action, success=success, diagnostic=diagnostic)
+                    except IndeterminateStateError as e:
+                        import sqlite3
+                        import datetime
+                        import uuid
+                        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                        diagnostic = {"error": f"Operation outcome is unknown due to interruption: {e}"}
+                        with sqlite3.connect(db_path) as conn:
+                            cursor = conn.cursor()
+                            cursor.execute("UPDATE approvals SET status = 'INDETERMINATE_STATE', result_diagnostic = ? WHERE id = ?", (json.dumps(diagnostic), req["id"]))
+                            event_id = str(uuid.uuid4())
+                            event_payload = json.dumps({
+                                "request_id": req["id"],
+                                "action": action,
+                                "status": "INDETERMINATE_STATE",
+                                "diagnostic": diagnostic
+                            })
+                            cursor.execute("INSERT INTO approval_outbox (event_id, request_id, event_type, payload, status, created_at, retries) VALUES (?, ?, 'OPERATION_COMPLETED', ?, 'PENDING', ?, 0)",
+                                           (event_id, req["id"], event_payload, now))
+                            conn.commit()
                     except Exception as e:
                         success = False
-                        diagnostic = {"error": f"Handler threw an exception: {e}"}
+                        diagnostic = {"error": f"Handler threw an exception before operation: {e}"}
+                        record_execution_result(db_path, req["id"], action, success=success, diagnostic=diagnostic)
                 else:
                     if action == "approval_demo":
                         success = True
@@ -68,8 +90,7 @@ async def background_approval_worker(app_config):
                     else:
                         success = False
                         diagnostic = {"error": f"No internal handler registered for action '{action}'"}
-
-                record_execution_result(db_path, req["id"], action, success=success, diagnostic=diagnostic)
+                    record_execution_result(db_path, req["id"], action, success=success, diagnostic=diagnostic)
 
             # 3. Process outbox notifications
             if webhook_url and webhook_url.startswith("https://"):

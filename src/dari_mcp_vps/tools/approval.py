@@ -76,7 +76,7 @@ def register_approval_tools(mcp: FastMCP, app_config):
             if not req:
                 return {"error": "Request not found"}
 
-            if req["status"] not in ("PENDING", "APPROVED", "RUNNING_SIMULATION"):
+            if req["status"] not in ("PENDING", "APPROVED", "RUNNING_SIMULATION", "EXECUTING"):
                 return {
                     "request_id": req["id"],
                     "status": req["status"],

@@ -5,6 +5,10 @@ from typing import Callable, Tuple, Dict, Any
 # Returns: (success, diagnostic_info)
 ActionHandler = Callable[[Dict[str, Any], Any], Tuple[bool, Dict[str, Any]]]
 
+class IndeterminateStateError(Exception):
+    """Raised when an operation fails after a point where partial execution might have occurred, making the outcome uncertain."""
+    pass
+
 _REGISTRY: Dict[str, ActionHandler] = {}
 
 def register_handler(action_name: str, handler: ActionHandler) -> None:

@@ -116,6 +116,74 @@ def test_transition_and_simulate(test_db_path, app_config):
     assert req["status"] == "SIMULATED_SUCCESS"
     assert req["result_diagnostic"]["log"] == "ok"
 
+@pytest.mark.asyncio
+async def test_approval_wait_executing_timeout(test_db_path, app_config, monkeypatch):
+    monkeypatch.setenv("APPROVAL_ENABLED", "true")
+    mcp = FastMCP("test")
+    register_approval_tools(mcp, app_config)
+
+    import inspect
+    tool = mcp.get_tool("approval_wait")
+    if inspect.iscoroutine(tool):
+        tool = await tool
+
+    req_id, _ = create_request(test_db_path, "key_wait_1", "approval_demo", {}, "secret123")
+
+    # Manually transition to EXECUTING
+    import sqlite3
+    with sqlite3.connect(test_db_path) as conn:
+        conn.execute("UPDATE approvals SET status = 'EXECUTING' WHERE id = ?", (req_id,))
+        conn.commit()
+
+    # Wait with short timeout
+    # Mock sleep to run fast
+    with patch("time.sleep"):
+        res = tool.fn(request_id=req_id, timeout_seconds=1)
+        if inspect.iscoroutine(res):
+            res = await res
+
+    assert res["wait_timed_out"] is True
+    assert res["status"] == "EXECUTING"
+
+@pytest.mark.asyncio
+async def test_approval_wait_executing_terminal(test_db_path, app_config, monkeypatch):
+    monkeypatch.setenv("APPROVAL_ENABLED", "true")
+    mcp = FastMCP("test")
+    register_approval_tools(mcp, app_config)
+
+    import inspect
+    tool = mcp.get_tool("approval_wait")
+    if inspect.iscoroutine(tool):
+        tool = await tool
+
+    req_id, _ = create_request(test_db_path, "key_wait_2", "approval_demo", {}, "secret123")
+
+    # First it's EXECUTING
+    import sqlite3
+    with sqlite3.connect(test_db_path) as conn:
+        conn.execute("UPDATE approvals SET status = 'EXECUTING' WHERE id = ?", (req_id,))
+        conn.commit()
+
+    # We patch get_request so on the second call it simulates a transition
+    original_get = get_request
+    call_count = [0]
+
+    def mock_get_request(db_path, r_id):
+        call_count[0] += 1
+        req = original_get(db_path, r_id)
+        if call_count[0] > 1:
+            req["status"] = "OPERATION_COMPLETED"
+        return req
+
+    with patch("dari_mcp_vps.tools.approval.get_request", side_effect=mock_get_request):
+        with patch("time.sleep"):
+            res = tool.fn(request_id=req_id, timeout_seconds=10)
+            if inspect.iscoroutine(res):
+                res = await res
+
+    assert res["wait_timed_out"] is False
+    assert res["status"] == "OPERATION_COMPLETED"
+
 def test_config_validation(test_db_path, monkeypatch):
     monkeypatch.setenv("IA_MCP_VPS_CONFIG", "config.example.yaml")
     monkeypatch.setenv("APPROVAL_DB_PATH", test_db_path)
