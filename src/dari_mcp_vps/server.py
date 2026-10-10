@@ -17,9 +17,47 @@ from dari_mcp_vps.tools.private_coding_job import register_private_coding_job_to
 from dari_mcp_vps.tools.jules_tools import register_jules_tools
 from dari_mcp_vps.tools.jules_monitor import monitor_lifespan_factory
 from dari_mcp_vps.tools.discovery import register_discovery_tools
+from contextlib import asynccontextmanager
+import asyncio
+import logging
+from dari_mcp_vps.tools.approval import register_approval_tools
+
+logger = logging.getLogger(__name__)
 
 CONFIG = load_config()
-mcp = FastMCP(CONFIG.raw.get("server", {}).get("name", "IA MCP VPS"), lifespan=monitor_lifespan_factory(CONFIG))
+
+def composed_lifespan_factory(app_config):
+    jules_lifespan = monitor_lifespan_factory(app_config)
+
+    @asynccontextmanager
+    async def composed_lifespan(server):
+        approval_task = None
+
+        if app_config.approval_enabled:
+            # Initialize approval DB
+            from dari_mcp_vps.tools.approval_db import init_db
+            try:
+                init_db(app_config.approval_db_path)
+                # Start approval worker
+                from dari_mcp_vps.tools.approval_worker import background_approval_worker
+                approval_task = asyncio.create_task(background_approval_worker(app_config))
+            except Exception as e:
+                logger.error(f"Failed to initialize approvals: {e}")
+
+        try:
+            async with jules_lifespan(server):
+                yield
+        finally:
+            if approval_task:
+                approval_task.cancel()
+                try:
+                    await approval_task
+                except asyncio.CancelledError:
+                    pass
+
+    return composed_lifespan
+
+mcp = FastMCP(CONFIG.raw.get("server", {}).get("name", "IA MCP VPS"), lifespan=composed_lifespan_factory(CONFIG))
 
 register_system_tools(mcp, CONFIG)
 register_filesystem_tools(mcp, CONFIG)
@@ -32,6 +70,7 @@ register_coding_job_tools(mcp, CONFIG)
 register_private_coding_job_tool(mcp, CONFIG)
 register_jules_tools(mcp, CONFIG)
 register_discovery_tools(mcp, CONFIG)
+register_approval_tools(mcp, CONFIG)
 
 
 def main() -> None:

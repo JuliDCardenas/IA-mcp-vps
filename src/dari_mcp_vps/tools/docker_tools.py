@@ -4,9 +4,13 @@ from __future__ import annotations
 import json
 import socket
 import urllib.parse
-from typing import Any
+import urllib.request
+import time
+from typing import Any, Tuple, Dict
 
 from dari_mcp_vps.security import assert_allowed_name
+from dari_mcp_vps.tools.action_dispatcher import register_handler
+from dari_mcp_vps.tools.approval_db import create_request
 
 DOCKER_SOCK = "/var/run/docker.sock"
 
@@ -217,13 +221,144 @@ def register_docker_tools(mcp: Any, app_config: Any) -> None:
             text = "\n".join(lines_out)
         return text[:20000]
 
+
     @mcp.tool(tags=["vps"], annotations={"readOnlyHint": False})
-    def docker_restart(container: str) -> str:
+    def docker_restart(container: str, idempotency_key: str | None = None) -> Any:
         """Restart an allowed Docker container."""
-        assert_allowed_name(app_config.raw, "allowed_containers", container)
+        policy = app_config.get_tool_policy("docker_restart")
+        if not policy["enabled"]:
+            raise RuntimeError("docker_restart tool is disabled by configuration.")
+        if container not in policy["targets"]:
+            raise RuntimeError(f"Container '{container}' is not an authorized target for docker_restart.")
+
+        # Verify it exists and create stable snapshot for safe delayed execution
         target = _find_container(container)
         cid = target.get("Id")
+        inspect_data = _json("GET", f"/containers/{cid}/json")
+        snapshot = {
+            "Id": inspect_data.get("Id"),
+            "Image": inspect_data.get("Config", {}).get("Image"),
+            "StartedAt": inspect_data.get("State", {}).get("StartedAt")
+        }
+
+        if policy["requires_approval"]:
+            if not idempotency_key:
+                raise ValueError("idempotency_key is required when requires_approval is true.")
+            if not app_config.approval_enabled:
+                raise RuntimeError("Approval is required by policy but the approval system is globally disabled or misconfigured.")
+
+            req_id, is_new = create_request(
+                app_config.approval_db_path,
+                idempotency_key,
+                "docker_restart",
+                {"container": container, "snapshot": snapshot},
+                app_config.approval_webhook_secret
+            )
+            return {
+                "request_id": req_id,
+                "status": "PENDING" if is_new else "ALREADY_EXISTS_CHECK_STATUS",
+                "message": f"Approval request recorded for restarting {container}. Waiting for decision."
+            }
+
+        # Synchronous execution if no approval is required
+        return execute_docker_restart({"container": container, "snapshot": snapshot}, app_config)[1]
+
+def execute_docker_restart(parameters: Dict[str, Any], app_config: Any) -> Tuple[bool, Dict[str, Any]]:
+    """Internal handler to perform the real restart and verify outcome."""
+    container = parameters.get("container")
+    expected_snapshot = parameters.get("snapshot")
+
+    if expected_snapshot is None:
+        return False, {"error": "Missing container snapshot in request parameters. Operation rejected for safety."}
+
+    # Re-validate policy right before execution
+    policy = app_config.get_tool_policy("docker_restart")
+    if not policy["enabled"] or container not in policy["targets"]:
+        return False, {"error": "Policy changed or container no longer authorized."}
+
+    try:
+        target = _find_container(container)
+        cid = target.get("Id")
+        inspect_data = _json("GET", f"/containers/{cid}/json")
+        current_snapshot = {
+            "Id": inspect_data.get("Id"),
+            "Image": inspect_data.get("Config", {}).get("Image"),
+            "StartedAt": inspect_data.get("State", {}).get("StartedAt")
+        }
+    except RuntimeError as e:
+        return False, {"error": f"Failed to fetch container state before execution: {e}"}
+
+    if expected_snapshot != current_snapshot:
+        return False, {"error": "Precondition failed: Container identity or state has changed since approval."}
+
+    # POST to socket
+    from dari_mcp_vps.tools.action_dispatcher import IndeterminateStateError
+    try:
         status, _headers, body = _docker_request("POST", f"/containers/{cid}/restart?t=10")
-        if status >= 400:
-            raise RuntimeError(body.decode("utf-8", errors="replace"))
-        return f"restarted {container}"
+    except Exception as e:
+        raise IndeterminateStateError(f"Lost connection during Docker POST. Container state is uncertain. Original error: {e}")
+
+    if status >= 400:
+        return False, {"error": f"Docker API error: {body.decode('utf-8', errors='replace')}"}
+
+    # Verify ID is preserved and it's running
+    time.sleep(1.0)
+    try:
+        new_target = _find_container(container)
+        if new_target.get("Id") != cid:
+            return False, {"error": "Container ID changed after restart, unexpected outcome."}
+
+        new_status = new_target.get("State")
+        if new_status not in ("running", "healthy"):
+            # Check JSON state
+            inspect_data = _json("GET", f"/containers/{cid}/json")
+            if not inspect_data.get("State", {}).get("Running"):
+                return False, {"error": "Container is not running after restart command."}
+    except Exception as e:
+        return False, {"error": f"Failed to verify container state: {e}"}
+
+    # Optional HTTP verification
+    # Specifically requested to verify homepage via http endpoint
+    http_target = app_config.allowed_http_targets.get(f"{container}_local")
+    diagnostic = {"message": f"Successfully restarted {container}", "container_id": cid[:12]}
+
+    if http_target:
+        # Resolve target structure (string legacy vs dict with url and headers)
+        if isinstance(http_target, dict):
+            url = http_target.get("url")
+            headers = http_target.get("headers", {})
+        else:
+            url = http_target
+            headers = {}
+
+        if url:
+            # Prevent redirects to avoid unverified destinations
+            req = urllib.request.Request(url, headers=headers)
+            opener = urllib.request.build_opener(urllib.request.HTTPRedirectHandler) # We disable redirects entirely by returning None in a custom handler if needed, but for now we just use a request. Actually, strict requirement: "no aceptar redirects a destinations arbitrarios". Let's configure a NoRedirectHandler.
+
+            class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, hdrs, newurl):
+                    return None
+
+            opener = urllib.request.build_opener(NoRedirectHandler())
+
+            # Give it a moment to boot
+            verified = False
+            for _ in range(5):
+                try:
+                    with opener.open(req, timeout=3) as resp:
+                        if resp.status == 200:
+                            verified = True
+                            break
+                except Exception:
+                    pass
+                time.sleep(2)
+
+            if not verified:
+                # We do NOT return False here. The restart itself succeeded. We just add a warning to the diagnostic.
+                diagnostic["warning"] = f"Container restarted but HTTP endpoint {url} did not return 200 OK."
+
+    return True, diagnostic
+
+# Register the handler
+register_handler("docker_restart", execute_docker_restart)
