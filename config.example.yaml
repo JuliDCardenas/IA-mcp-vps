@@ -1,20 +1,20 @@
-server:
-  name: IA MCP VPS
-jules:
-  db_path: /var/lib/coding-jobs/jules_jobs.db
-  observability:
+# Migración a base de datos de aprobación:
+# No es necesario ejecutar ningún script de migración estructural en SQLite.
+# El nuevo sistema agrega el estado EXECUTING e INDETERMINATE_STATE a los posibles estados de 'status'.
+# Los registros existentes en estado 'PENDING' o 'APPROVED' no se ven afectados y conservarán su flujo actual.
+# Asegúrate de realizar una copia de seguridad (backup) del archivo approvals.db antes de desplegar.
+# IMPORTANTE: Si el worker colapsa o el contenedor se reinicia durante una operación (EXECUTING),
+# NO reintentar ciegamente la operación, requiere autorización y reinicio manual.
+
+allowed_containers:
+  - homepage
+
+allowed_http_targets:
+  homepage_local: "http://host.docker.internal:3001"
+
+tools:
+  docker_restart:
     enabled: true
-    output_dir: /var/lib/jules-observability
-    interval_seconds: 60
-security:
-  max_file_bytes: 200000
-  max_log_lines: 500
-  deny_paths: [/root, /etc/shadow, /etc/sudoers, /home/*/.ssh]
-  deny_file_names: [.env, id_rsa, id_ed25519]
-allowed_paths:
-  gps_stack:
-    root: /opt/gps-tracker
-    writable: true
-    extensions: [.py, .yml, .yaml, .json, .txt, .md, .conf]
-allowed_containers: [mosquitto, traccar, subscriber-json-osmand]
-allowed_services: [mosquitto, traccar]
+    requires_approval: true
+    targets:
+      - homepage

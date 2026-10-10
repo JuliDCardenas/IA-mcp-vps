@@ -61,6 +61,10 @@ async def test_tool_tags_metadata(test_mcp_app):
         "coding_job_cleanup": "agy",
         "coding_private_job_create": "agy",
 
+        "approval_simulate_request": "agy",
+        "approval_status": "agy",
+        "approval_wait": "agy",
+
         "jules_request_coding_task": "jules",
         "jules_reply_to_task": "jules",
         "jules_check_task_status": "jules",
