@@ -38,6 +38,8 @@ def init_db(db_path: str) -> None:
                 payload TEXT NOT NULL,
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL,
+                retries INTEGER DEFAULT 0,
+                next_attempt TEXT,
                 FOREIGN KEY (request_id) REFERENCES approvals(id)
             )
         """)
@@ -49,18 +51,38 @@ def create_request(
     idempotency_key: str,
     action: str,
     parameters: Dict[str, Any],
+    app_secret: str,
     ttl_seconds: int = 300
 ) -> Tuple[str, str]:
     """Creates a new approval request or returns existing if idempotency key and digest match."""
     now = datetime.datetime.now(datetime.timezone.utc)
     expires_at = now + datetime.timedelta(seconds=ttl_seconds)
 
-    params_json = json.dumps(parameters, sort_keys=True)
-    params_digest = hashlib.sha256(params_json.encode('utf-8')).hexdigest()
+    if not isinstance(parameters, dict):
+        raise ValueError("Parameters must be a dictionary")
+
+    try:
+        params_json = json.dumps(parameters, sort_keys=True)
+        if "NaN" in params_json:
+            raise ValueError("Parameters cannot contain NaN")
+        if len(params_json) > 16384:
+            raise ValueError("Parameters payload exceeds 16KB limit")
+    except Exception as e:
+        raise ValueError(f"Invalid parameters payload: {e}")
+
+    # Bind action and parameters to the digest
+    canonical_payload = json.dumps({
+        "action": action,
+        "parameters": parameters,
+        "version": "1"
+    }, sort_keys=True)
+
+    params_digest = hashlib.sha256(canonical_payload.encode('utf-8')).hexdigest()
 
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
 
+        conn.execute("BEGIN EXCLUSIVE")
         # Check if exists
         cursor.execute("SELECT id, parameters_digest FROM approvals WHERE idempotency_key = ?", (idempotency_key,))
         row = cursor.fetchone()
@@ -68,13 +90,16 @@ def create_request(
         if row:
             existing_id, existing_digest = row
             if existing_digest != params_digest:
-                raise ValueError("Idempotency conflict: parameters have changed.")
+                conn.rollback()
+                raise ValueError("Idempotency conflict: parameters or action have changed for the same key.")
+            conn.rollback()
             return existing_id, "ALREADY_EXISTS"  # Token is lost but that's expected for existing requests (can't resend it)
 
         # Generate new (req_id max 12 chars to keep callback_data <= 64 bytes)
         req_id = f"a_{secrets.token_hex(4)}"
-        # 12 bytes (24 hex char or 16 base64 chars depending on encoding) capability token.
-        capability_token = secrets.token_urlsafe(12)
+
+        import hmac
+        capability_token = hmac.new(app_secret.encode('utf-8'), req_id.encode('utf-8'), hashlib.sha256).hexdigest()[:24]
         capability_hash = hashlib.sha256(capability_token.encode('utf-8')).hexdigest()
 
         cursor.execute("""
@@ -91,14 +116,13 @@ def create_request(
             "action": action,
             "parameters": parameters,
             "parameters_digest": params_digest,
-            "expires_at": expires_at.isoformat(),
-            "capability_token": capability_token # Only sent to the outbox once
+            "expires_at": expires_at.isoformat()
         })
 
         cursor.execute("""
-            INSERT INTO approval_outbox (event_id, request_id, event_type, payload, status, created_at)
-            VALUES (?, ?, 'APPROVAL_REQUESTED', ?, 'PENDING', ?)
-        """, (event_id, req_id, event_payload, now.isoformat()))
+            INSERT INTO approval_outbox (event_id, request_id, event_type, payload, status, created_at, retries, next_attempt)
+            VALUES (?, ?, 'APPROVAL_REQUESTED', ?, 'PENDING', ?, 0, ?)
+        """, (event_id, req_id, event_payload, now.isoformat(), now.isoformat()))
 
         conn.commit()
 
@@ -189,11 +213,14 @@ def transition_to_running(db_path: str) -> list[Dict[str, Any]]:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
-        cursor.execute("SELECT id, action, parameters FROM approvals WHERE status = 'APPROVED'")
-        approved = [dict(r) for r in cursor.fetchall()]
+        # Atomically select and transition
+        cursor.execute("UPDATE approvals SET status = 'RUNNING_SIMULATION' WHERE status = 'APPROVED' RETURNING id, action, parameters")
 
-        for req in approved:
-            cursor.execute("UPDATE approvals SET status = 'RUNNING_SIMULATION' WHERE id = ? AND status = 'APPROVED'", (req["id"],))
+        approved = []
+        for row in cursor.fetchall():
+            req = dict(row)
+            req["parameters"] = json.loads(req["parameters"])
+            approved.append(req)
 
         conn.commit()
         return approved
@@ -225,14 +252,41 @@ def record_simulation_result(db_path: str, request_id: str, success: bool, diagn
         conn.commit()
 
 def get_pending_outbox_events(db_path: str) -> list[Dict[str, Any]]:
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM approval_outbox WHERE status = 'PENDING' ORDER BY created_at ASC")
+        cursor.execute("SELECT * FROM approval_outbox WHERE status = 'PENDING' AND (next_attempt IS NULL OR next_attempt <= ?) ORDER BY created_at ASC", (now,))
         return [dict(row) for row in cursor.fetchall()]
 
 def mark_outbox_event_sent(db_path: str, event_id: str) -> None:
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute("UPDATE approval_outbox SET status = 'SENT' WHERE event_id = ?", (event_id,))
+        conn.commit()
+
+def increment_outbox_retry(db_path: str, event_id: str, max_retries: int = 5) -> None:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT retries FROM approval_outbox WHERE event_id = ?", (event_id,))
+        row = cursor.fetchone()
+        if row:
+            retries = row[0]
+            if retries >= max_retries:
+                cursor.execute("UPDATE approval_outbox SET status = 'FAILED' WHERE event_id = ?", (event_id,))
+            else:
+                backoff_seconds = 2 ** retries * 5
+                next_attempt = (now + datetime.timedelta(seconds=backoff_seconds)).isoformat()
+                cursor.execute("UPDATE approval_outbox SET retries = retries + 1, next_attempt = ? WHERE event_id = ?", (next_attempt, event_id))
+        conn.commit()
+
+def reset_stuck_simulations(db_path: str) -> None:
+    # We cannot reliably know what a stuck simulation was doing, we just fail it closed for recovery
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE approvals SET status = 'SIMULATED_FAILURE', result_diagnostic = '{"error": "Simulation was interrupted by worker restart"}'
+            WHERE status = 'RUNNING_SIMULATION'
+        """)
         conn.commit()

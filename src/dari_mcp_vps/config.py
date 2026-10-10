@@ -46,6 +46,10 @@ class AppConfig:
         return os.getenv('N8N_WEBHOOK_KEY', self.raw.get('jules', {}).get('n8n_webhook_key', ''))
 
     @property
+    def approval_enabled(self):
+        return str(os.getenv('APPROVAL_ENABLED', self.raw.get('approvals', {}).get('enabled', 'false'))).lower() == 'true'
+
+    @property
     def approval_db_path(self):
         return os.getenv('APPROVAL_DB_PATH', self.raw.get('approvals', {}).get('db_path', '/var/lib/coding-jobs/approvals.db'))
 

@@ -21,6 +21,9 @@ def register_approval_tools(mcp: FastMCP, app_config):
         parameters: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Request a simulated action that requires durable approval."""
+        if not app_config.approval_enabled:
+            return {"error": "Approval feature is disabled by configuration"}
+
         if not app_config.approval_telegram_user_id or not app_config.approval_telegram_chat_id:
             return {"error": "Approval system is not configured"}
 
@@ -29,7 +32,8 @@ def register_approval_tools(mcp: FastMCP, app_config):
                 db_path,
                 idempotency_key,
                 action,
-                parameters
+                parameters,
+                app_config.approval_webhook_secret
             )
 
             return {
@@ -43,6 +47,8 @@ def register_approval_tools(mcp: FastMCP, app_config):
     @mcp.tool(tags=["agy"], annotations={"readOnlyHint": True})
     def approval_status(request_id: str) -> Dict[str, Any]:
         """Check the status of an approval request."""
+        if not app_config.approval_enabled:
+            return {"error": "Approval feature is disabled by configuration"}
         req = get_request(db_path, request_id)
         if not req:
             return {"error": "Request not found"}
@@ -57,8 +63,10 @@ def register_approval_tools(mcp: FastMCP, app_config):
     @mcp.tool(tags=["agy"], annotations={"readOnlyHint": True})
     def approval_wait(request_id: str, timeout_seconds: int = 10) -> Dict[str, Any]:
         """Wait a bounded time for an approval request to reach a terminal state."""
+        if not app_config.approval_enabled:
+            return {"error": "Approval feature is disabled by configuration"}
         timeout_seconds = min(max(int(timeout_seconds), 1), 60)
-        poll_seconds = 2
+        poll_interval = 2
         deadline = time.monotonic() + timeout_seconds
 
         while time.monotonic() < deadline:
@@ -75,7 +83,8 @@ def register_approval_tools(mcp: FastMCP, app_config):
                     "wait_timed_out": False
                 }
 
-            time.sleep(poll_seconds)
+            time_left = max(0, deadline - time.monotonic())
+            time.sleep(min(poll_interval, time_left))
 
         # Timeout reached, return current state
         req = get_request(db_path, request_id)
@@ -94,6 +103,8 @@ def register_approval_tools(mcp: FastMCP, app_config):
     try:
         @mcp.custom_route("/webhook/approval-decision", methods=["POST"])
         async def approval_decision_webhook(request: Request):
+            if not app_config.approval_enabled:
+                return JSONResponse({"error": "Feature disabled"}, status_code=503)
             if not app_config.approval_webhook_secret:
                 return JSONResponse({"error": "Webhook secret not configured"}, status_code=500)
 
@@ -130,5 +141,7 @@ def register_approval_tools(mcp: FastMCP, app_config):
             else:
                 return JSONResponse({"error": "Failed to claim decision. It may be expired, already claimed, or the token is invalid."}, status_code=400)
     except AttributeError:
-        # Fallback if fastmcp custom_route decorator missing in specific version
-        pass
+        if app_config.approval_enabled:
+            import logging
+            logging.getLogger(__name__).error("FastMCP does not support custom_route. Cannot register approval callback.")
+            raise RuntimeError("FastMCP version does not support required custom_route for approvals.")
