@@ -47,7 +47,15 @@ class AppConfig:
 
     @property
     def approval_enabled(self):
-        return str(os.getenv('APPROVAL_ENABLED', self.raw.get('approvals', {}).get('enabled', 'false'))).lower() == 'true'
+        enabled = str(os.getenv('APPROVAL_ENABLED', self.raw.get('approvals', {}).get('enabled', 'false'))).lower() == 'true'
+        if enabled:
+            # Validate hard requirements for enabled
+            if not self.approval_webhook_secret or not self.approval_telegram_user_id or not self.approval_telegram_chat_id:
+                return False
+            # Require HTTPS
+            if not self.approval_n8n_webhook_url or not self.approval_n8n_webhook_url.startswith("https://"):
+                return False
+        return enabled
 
     @property
     def approval_db_path(self):

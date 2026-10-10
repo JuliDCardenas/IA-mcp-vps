@@ -31,25 +31,29 @@ def composed_lifespan_factory(app_config):
 
     @asynccontextmanager
     async def composed_lifespan(server):
-        # Initialize approval DB
-        from dari_mcp_vps.tools.approval_db import init_db
+        approval_task = None
+
+        if app_config.approval_enabled:
+            # Initialize approval DB
+            from dari_mcp_vps.tools.approval_db import init_db
+            try:
+                init_db(app_config.approval_db_path)
+                # Start approval worker
+                from dari_mcp_vps.tools.approval_worker import background_approval_worker
+                approval_task = asyncio.create_task(background_approval_worker(app_config))
+            except Exception as e:
+                logger.error(f"Failed to initialize approvals: {e}")
+
         try:
-            init_db(app_config.approval_db_path)
-        except Exception as e:
-            logger.error(f"Failed to initialize approval DB: {e}")
-
-        # Start approval worker
-        from dari_mcp_vps.tools.approval_worker import background_approval_worker
-        approval_task = asyncio.create_task(background_approval_worker(app_config))
-
-        async with jules_lifespan(server):
-            yield
-
-        approval_task.cancel()
-        try:
-            await approval_task
-        except asyncio.CancelledError:
-            pass
+            async with jules_lifespan(server):
+                yield
+        finally:
+            if approval_task:
+                approval_task.cancel()
+                try:
+                    await approval_task
+                except asyncio.CancelledError:
+                    pass
 
     return composed_lifespan
 

@@ -4,6 +4,8 @@ import urllib.request
 import urllib.error
 import json
 import functools
+import hmac
+import hashlib
 from dari_mcp_vps.tools.approval_db import (
     init_db,
     expire_pending_requests,
@@ -25,6 +27,7 @@ async def background_approval_worker(app_config):
     db_path = app_config.approval_db_path
     webhook_url = app_config.approval_n8n_webhook_url
     webhook_key = app_config.approval_n8n_webhook_key
+    app_secret = app_config.approval_webhook_secret
 
     # Check if disabled
     if not app_config.approval_enabled:
@@ -61,7 +64,14 @@ async def background_approval_worker(app_config):
             if webhook_url and webhook_url.startswith("https://"):
                 events = get_pending_outbox_events(db_path)
                 for event in events:
-                    req_data = event["payload"].encode("utf-8")
+                    # Reconstruct the capability token in memory for transmission
+                    payload_dict = json.loads(event["payload"])
+                    if event["event_type"] == "APPROVAL_REQUESTED":
+                        req_id = payload_dict["request_id"]
+                        capability_token = hmac.new(app_secret.encode('utf-8'), req_id.encode('utf-8'), hashlib.sha256).hexdigest()[:24]
+                        payload_dict["capability_token"] = capability_token
+
+                    req_data = json.dumps(payload_dict).encode("utf-8")
                     req_http = urllib.request.Request(
                         webhook_url,
                         data=req_data,

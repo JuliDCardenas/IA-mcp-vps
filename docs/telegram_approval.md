@@ -29,13 +29,14 @@ La implementación n8n no está incluida en esta entrega, pero deberá respetar 
 ```json
 {
   "request_id": "a_f2b4c6e8",
-  "action": "execute_code",
-  "parameters": {"command": "npm test"},
+  "action": "approval_demo",
+  "parameters": {"target": "demo"},
   "parameters_digest": "4a7b9c...",
-  "expires_at": "2026-10-10T12:00:00.000000+00:00"
+  "expires_at": "2026-10-10T12:00:00.000000+00:00",
+  "capability_token": "hmac_token_24_chars"
 }
 ```
-*(Nota: N8N deberá componer la UI de botones utilizando su propia configuración, pero `capability_token` nunca se transmite en este JSON para no exponerlo en histórico si no es necesario o n8n lo calculará si se incluye a futuro en una iteración permitida. Actualmente en esta entrega CORE el token se extrae del return y se pierde si no se inyecta en el JSON del webhook o requiere rediseño en entrega B).*
+*(Nota: N8N deberá componer la UI de botones utilizando su propia configuración. El `capability_token` se genera dinámicamente en el envío HTTP y se incluye en el payload para que n8n ensamble el callback_data <= 64 bytes. NUNCA se persiste en texto plano en la base de datos).*
 
 ### 2. Payload Entrante (Desde N8N a MCP)
 Endpoint: `POST /webhook/approval-decision`

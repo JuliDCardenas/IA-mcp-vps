@@ -24,44 +24,47 @@ def test_db_path(tmp_path):
     return str(tmp_path / "test_approvals.db")
 
 @pytest.fixture
-def app_config(test_db_path):
-    os.environ["IA_MCP_VPS_CONFIG"] = "config.example.yaml"
-    os.environ["APPROVAL_DB_PATH"] = test_db_path
-    os.environ["APPROVAL_WEBHOOK_SECRET"] = "secret123"
-    os.environ["APPROVAL_TELEGRAM_USER_ID"] = "1111"
-    os.environ["APPROVAL_TELEGRAM_CHAT_ID"] = "2222"
+def app_config(test_db_path, monkeypatch):
+    monkeypatch.setenv("IA_MCP_VPS_CONFIG", "config.example.yaml")
+    monkeypatch.setenv("APPROVAL_DB_PATH", test_db_path)
+    monkeypatch.setenv("APPROVAL_WEBHOOK_SECRET", "secret123")
+    monkeypatch.setenv("APPROVAL_TELEGRAM_USER_ID", "1111")
+    monkeypatch.setenv("APPROVAL_TELEGRAM_CHAT_ID", "2222")
     config = load_config()
     init_db(test_db_path)
     return config
 
 def test_create_and_get_request(test_db_path, app_config):
     params = {"target": "foo"}
-    req_id, token = create_request(test_db_path, "key1", "restart", params, "secret")
+    req_id = create_request(test_db_path, "key1", "approval_demo", params, "secret123")
 
     assert req_id.startswith("a_")
 
     req = get_request(test_db_path, req_id)
     assert req is not None
-    assert req["action"] == "restart"
+    assert req["action"] == "approval_demo"
     assert req["status"] == "PENDING"
     assert req["parameters"] == params
 
 def test_idempotency(test_db_path, app_config):
     params = {"target": "foo"}
-    req_id1, token1 = create_request(test_db_path, "key1", "restart", params, "secret")
+    req_id1 = create_request(test_db_path, "key1", "approval_demo", params, "secret123")
 
     # Same key and params -> should return existing
-    req_id2, token2 = create_request(test_db_path, "key1", "restart", params, "secret")
+    req_id2 = create_request(test_db_path, "key1", "approval_demo", params, "secret123")
 
     assert req_id1 == req_id2
-    assert token2 == "ALREADY_EXISTS"
 
     # Same key, different params -> should reject
     with pytest.raises(ValueError, match="conflict"):
-        create_request(test_db_path, "key1", "restart", {"target": "bar"}, "secret")
+        create_request(test_db_path, "key1", "approval_demo", {"target": "bar"}, "secret123")
 
 def test_claim_decision(test_db_path, app_config):
-    req_id, token = create_request(test_db_path, "key2", "stop", {}, "secret")
+    req_id = create_request(test_db_path, "key2", "approval_demo", {}, "secret123")
+
+    # We must compute the capability correctly to claim it
+    import hmac
+    token = hmac.new(b"secret123", req_id.encode('utf-8'), hashlib.sha256).hexdigest()[:24]
 
     # Try invalid token
     assert not claim_decision(test_db_path, req_id, "badtoken", "APPROVED")
@@ -80,7 +83,10 @@ def test_expire_pending(test_db_path, app_config):
     now = datetime.datetime.now(datetime.timezone.utc)
 
     # Create in the past by passing a negative TTL
-    req_id, token = create_request(test_db_path, "key3", "start", {}, "secret", ttl_seconds=-10)
+    req_id = create_request(test_db_path, "key3", "approval_demo", {}, "secret123", ttl_seconds=-10)
+
+    import hmac
+    token = hmac.new(b"secret123", req_id.encode('utf-8'), hashlib.sha256).hexdigest()[:24]
 
     expire_pending_requests(test_db_path)
 
@@ -91,7 +97,11 @@ def test_expire_pending(test_db_path, app_config):
     assert not claim_decision(test_db_path, req_id, token, "APPROVED")
 
 def test_transition_and_simulate(test_db_path, app_config):
-    req_id, token = create_request(test_db_path, "key4", "run", {}, "secret")
+    req_id = create_request(test_db_path, "key4", "approval_demo", {}, "secret123")
+
+    import hmac
+    token = hmac.new(b"secret123", req_id.encode('utf-8'), hashlib.sha256).hexdigest()[:24]
+
     claim_decision(test_db_path, req_id, token, "APPROVED")
 
     running = transition_to_running(test_db_path)
@@ -113,7 +123,12 @@ async def test_webhook_route(app_config):
     from starlette.routing import Route
 
     os.environ["APPROVAL_ENABLED"] = "true"
+    os.environ["APPROVAL_WEBHOOK_SECRET"] = "secret123"
+    os.environ["APPROVAL_TELEGRAM_USER_ID"] = "1111"
+    os.environ["APPROVAL_TELEGRAM_CHAT_ID"] = "2222"
+    os.environ["APPROVAL_N8N_WEBHOOK_URL"] = "https://example.com"
     app_config.raw["approvals"] = {"enabled": "true"}
+    app_config.raw["approvals"]["webhook_secret"] = "secret123"
 
     mcp = FastMCP("test")
     register_approval_tools(mcp, app_config)
@@ -128,7 +143,9 @@ async def test_webhook_route(app_config):
 
     client = TestClient(app)
 
-    req_id, token = create_request(app_config.approval_db_path, "key5", "test_route", {}, "secret123")
+    req_id = create_request(app_config.approval_db_path, "key5", "approval_demo", {}, "secret123")
+    import hmac
+    token = hmac.new(b"secret123", req_id.encode('utf-8'), hashlib.sha256).hexdigest()[:24]
 
     # Missing auth
     response = client.post("/webhook/approval-decision", json={})

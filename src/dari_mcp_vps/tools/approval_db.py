@@ -53,18 +53,19 @@ def create_request(
     parameters: Dict[str, Any],
     app_secret: str,
     ttl_seconds: int = 300
-) -> Tuple[str, str]:
+) -> str:
     """Creates a new approval request or returns existing if idempotency key and digest match."""
     now = datetime.datetime.now(datetime.timezone.utc)
     expires_at = now + datetime.timedelta(seconds=ttl_seconds)
+
+    if action not in ("approval_demo",):
+        raise ValueError(f"Action '{action}' is not in allowlist.")
 
     if not isinstance(parameters, dict):
         raise ValueError("Parameters must be a dictionary")
 
     try:
-        params_json = json.dumps(parameters, sort_keys=True)
-        if "NaN" in params_json:
-            raise ValueError("Parameters cannot contain NaN")
+        params_json = json.dumps(parameters, sort_keys=True, allow_nan=False)
         if len(params_json) > 16384:
             raise ValueError("Parameters payload exceeds 16KB limit")
     except Exception as e:
@@ -75,7 +76,7 @@ def create_request(
         "action": action,
         "parameters": parameters,
         "version": "1"
-    }, sort_keys=True)
+    }, sort_keys=True, allow_nan=False)
 
     params_digest = hashlib.sha256(canonical_payload.encode('utf-8')).hexdigest()
 
@@ -93,7 +94,7 @@ def create_request(
                 conn.rollback()
                 raise ValueError("Idempotency conflict: parameters or action have changed for the same key.")
             conn.rollback()
-            return existing_id, "ALREADY_EXISTS"  # Token is lost but that's expected for existing requests (can't resend it)
+            return existing_id
 
         # Generate new (req_id max 12 chars to keep callback_data <= 64 bytes)
         req_id = f"a_{secrets.token_hex(4)}"
@@ -126,7 +127,7 @@ def create_request(
 
         conn.commit()
 
-        return req_id, capability_token
+        return req_id
 
 def get_request(db_path: str, request_id: str) -> Optional[Dict[str, Any]]:
     with sqlite3.connect(db_path) as conn:
@@ -157,12 +158,12 @@ def claim_decision(
 
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT status, expires_at, capability_hash FROM approvals WHERE id = ?", (request_id,))
+        cursor.execute("SELECT status, expires_at, capability_hash, action, parameters, parameters_digest FROM approvals WHERE id = ?", (request_id,))
         row = cursor.fetchone()
         if not row:
             return False
 
-        status, expires_at_str, capability_hash = row
+        status, expires_at_str, capability_hash, action, parameters_raw, parameters_digest = row
 
         # Verify capability securely
         import hmac
@@ -170,6 +171,22 @@ def claim_decision(
             return False
 
         if status != "PENDING":
+            return False
+
+        # Tamper check before claiming
+        canonical_payload = json.dumps({
+            "action": action,
+            "parameters": json.loads(parameters_raw),
+            "version": "1"
+        }, sort_keys=True)
+        recomputed_digest = hashlib.sha256(canonical_payload.encode('utf-8')).hexdigest()
+        if recomputed_digest != parameters_digest:
+            # Tampering detected, fail securely
+            cursor.execute("""
+                UPDATE approvals SET status = 'SIMULATED_FAILURE', result_diagnostic = '{"error": "Payload tampering detected before claim"}'
+                WHERE id = ? AND status = 'PENDING'
+            """, (request_id,))
+            conn.commit()
             return False
 
         expires_at = datetime.datetime.fromisoformat(expires_at_str)
@@ -214,11 +231,24 @@ def transition_to_running(db_path: str) -> list[Dict[str, Any]]:
         cursor = conn.cursor()
 
         # Atomically select and transition
-        cursor.execute("UPDATE approvals SET status = 'RUNNING_SIMULATION' WHERE status = 'APPROVED' RETURNING id, action, parameters")
+        cursor.execute("UPDATE approvals SET status = 'RUNNING_SIMULATION' WHERE status = 'APPROVED' RETURNING id, action, parameters, parameters_digest")
 
         approved = []
         for row in cursor.fetchall():
             req = dict(row)
+            stored_digest = req.pop("parameters_digest")
+
+            canonical_payload = json.dumps({
+                "action": req["action"],
+                "parameters": json.loads(req["parameters"]),
+                "version": "1"
+            }, sort_keys=True, allow_nan=False)
+            recomputed_digest = hashlib.sha256(canonical_payload.encode('utf-8')).hexdigest()
+
+            if recomputed_digest != stored_digest:
+                cursor.execute("UPDATE approvals SET status = 'SIMULATED_FAILURE', result_diagnostic = '{\"error\": \"Payload tampering detected before simulation\"}' WHERE id = ?", (req["id"],))
+                continue
+
             req["parameters"] = json.loads(req["parameters"])
             approved.append(req)
 
@@ -279,14 +309,4 @@ def increment_outbox_retry(db_path: str, event_id: str, max_retries: int = 5) ->
                 backoff_seconds = 2 ** retries * 5
                 next_attempt = (now + datetime.timedelta(seconds=backoff_seconds)).isoformat()
                 cursor.execute("UPDATE approval_outbox SET retries = retries + 1, next_attempt = ? WHERE event_id = ?", (next_attempt, event_id))
-        conn.commit()
-
-def reset_stuck_simulations(db_path: str) -> None:
-    # We cannot reliably know what a stuck simulation was doing, we just fail it closed for recovery
-    with sqlite3.connect(db_path) as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE approvals SET status = 'SIMULATED_FAILURE', result_diagnostic = '{"error": "Simulation was interrupted by worker restart"}'
-            WHERE status = 'RUNNING_SIMULATION'
-        """)
         conn.commit()

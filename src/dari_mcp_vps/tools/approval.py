@@ -1,5 +1,7 @@
 import json
 import time
+import datetime
+import sqlite3
 from typing import Any, Dict
 from fastmcp import FastMCP
 from starlette.requests import Request
@@ -91,6 +93,18 @@ def register_approval_tools(mcp: FastMCP, app_config):
         if not req:
             return {"error": "Request not found (deleted during wait)"}
 
+        # Ensure we don't return PENDING if it has logically expired but worker hasn't cleaned it yet
+        if req["status"] == "PENDING":
+            now_dt = datetime.datetime.now(datetime.timezone.utc)
+            with sqlite3.connect(db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT expires_at FROM approvals WHERE id = ?", (request_id,))
+                row = cursor.fetchone()
+                if row:
+                    expires_at_dt = datetime.datetime.fromisoformat(row[0])
+                    if now_dt >= expires_at_dt:
+                        req["status"] = "EXPIRED"
+
         return {
             "request_id": req["id"],
             "status": req["status"],
@@ -118,7 +132,9 @@ def register_approval_tools(mcp: FastMCP, app_config):
 
             try:
                 body = await request.json()
-            except json.JSONDecodeError:
+                if not isinstance(body, dict):
+                    return JSONResponse({"error": "Invalid payload format, expected object"}, status_code=400)
+            except Exception:
                 return JSONResponse({"error": "Invalid JSON payload"}, status_code=400)
 
             user_id = body.get("user_id")
