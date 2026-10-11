@@ -43,6 +43,10 @@ async def test_tool_tags_metadata(test_mcp_app):
         "validate_yaml": "repositorios_archivos",
         "validate_json": "repositorios_archivos",
         "git_status": "repositorios_archivos",
+        "patch_file_atomic": ["repositorios_archivos", "mutaciones"],
+        "git_update_ff_only": ["repositorios_archivos", "mutaciones"],
+        "deployment_preflight": "vps",
+        "docker_compose_up_service": ["vps", "mutaciones"],
 
         "coding_repository_list": "agy",
         "coding_job_create": "agy",
@@ -60,6 +64,10 @@ async def test_tool_tags_metadata(test_mcp_app):
         "coding_job_cancel": "agy",
         "coding_job_cleanup": "agy",
         "coding_private_job_create": "agy",
+
+        "approval_simulate_request": "agy",
+        "approval_status": "agy",
+        "approval_wait": "agy",
 
         "jules_request_coding_task": "jules",
         "jules_reply_to_task": "jules",
@@ -88,7 +96,7 @@ async def test_tool_tags_metadata(test_mcp_app):
         expected_tag = expected_tags_map[t.name]
 
         # Tags are represented as sets in fastmcp
-        assert tags == {expected_tag}, f"Tool {t.name} has tags {tags}, expected {{{expected_tag}}}"
+        assert tags == set(expected_tag) if isinstance(expected_tag, list) else tags == {expected_tag}, f"Tool {t.name} has tags {tags}, expected {{{expected_tag}}}"
 
         # Verify schema is intact (basic sanity check)
         assert hasattr(local_tool, 'parameters'), f"Tool {t.name} is missing parameters schema"
