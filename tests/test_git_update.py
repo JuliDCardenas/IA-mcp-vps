@@ -82,17 +82,21 @@ def test_git_update_ff_only_execute(tmp_path, isolated_action_dispatcher, monkey
     call_args = []
     def mock_run_git(repo, args):
         call_args.append(args)
+        effective=args[:]
+        while effective and effective[0]=="-c":effective=effective[2:]
+        args=effective
         if args[0] == "rev-parse" and args[1] == "--is-inside-work-tree": return "true"
         if args[0] == "rev-parse" and args[1] == "HEAD":
-             if ["merge", "--ff-only", "target_sha"] in call_args:
-                  return "target_sha"
-             return "base_sha"
+             if any("merge" in c for c in call_args):
+                  return "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+             return "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         if args[0] == "status": return ""
         if args[0] == "branch": return "main"
+        if args[:2] == ["remote","get-url"]: return "https://github.com/example/sample.git"
         if args[0] == "remote": return "origin"
-        if args[0] == "rev-parse" and args[1] == "origin/main": return "target_sha"
+        if args[0] == "rev-parse" and args[1] == "origin/main": return "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         if args[0] == "merge-base":
-             if args[2] == "target_sha": return "base_sha" if args[1] == "HEAD" else "target_sha"
+             if args[2] == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": return "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" if args[1] == "HEAD" else "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         return ""
 
     monkeypatch.setattr(gt, "_run_git", mock_run_git)
@@ -100,8 +104,8 @@ def test_git_update_ff_only_execute(tmp_path, isolated_action_dispatcher, monkey
     params = {
         "scope": "test_scope",
         "path": ".",
-        "expected_base_sha": "base_sha",
-        "target_sha": "target_sha",
+        "expected_base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "target_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "policy_digest": current_policy_digest,
         "remote": "origin",
         "branch": "main"
@@ -113,4 +117,4 @@ def test_git_update_ff_only_execute(tmp_path, isolated_action_dispatcher, monkey
     success, diag = execute_git_update_ff_only(params, app_config)
     assert success is True
     assert "message" in diag
-    assert ["merge", "--ff-only", "target_sha"] in call_args
+    assert ["-c", "core.hooksPath=/dev/null", "merge", "--ff-only", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"] in call_args

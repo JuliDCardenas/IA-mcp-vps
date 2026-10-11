@@ -62,6 +62,33 @@ def _compose_path(config: dict[str, Any], project: str) -> Path:
     return path
 
 
+def _host_project_directory(app_config: Any, compose_path: Path) -> str:
+    """Map the trusted container path to the Docker daemon's host path.
+
+    Caller cannot provide mappings. Mirror host destination read-only in worker
+    so Compose can resolve .env/build context without using /mnt/stacks paths
+    as host bind-mount sources.
+    """
+    mappings = app_config.raw.get("tools", {}).get("docker_compose_up_service", {}).get("host_path_map", {})
+    if not isinstance(mappings, dict):
+        raise SecurityError("host_path_map must be an object")
+    parent = compose_path.resolve().parent
+    for source, destination in sorted(mappings.items(), key=lambda pair: len(pair[0]), reverse=True):
+        if not isinstance(source, str) or not isinstance(destination, str) or not Path(source).is_absolute() or not Path(destination).is_absolute():
+            raise SecurityError("host_path_map requires absolute paths")
+        try:
+            relative = parent.relative_to(Path(source).resolve())
+        except ValueError:
+            continue
+        mapped = Path(destination) / relative
+        if not mapped.is_dir():
+            raise SecurityError("Host project directory is not accessible in worker; mount it read-only")
+        return str(mapped)
+    if str(parent).startswith("/mnt/stacks/"):
+        raise SecurityError("Compose host_path_map required for /mnt/stacks")
+    return str(parent)
+
+
 def _load_compose(compose_file: Path) -> dict[str, Any]:
     return yaml.safe_load(compose_file.read_text(encoding="utf-8")) or {}
 
@@ -202,9 +229,18 @@ def register_compose_tools(mcp: Any, app_config: Any) -> None:
     def deployment_preflight(project: str, service: str) -> dict[str, Any]:
         """Perform a read-only preflight check for a deployment of a single Compose service."""
         try:
+             import shutil
+             if not shutil.which("docker"):
+                  return {"error": "Preflight failed: docker CLI not found on backend."}
+             backend = subprocess.run(["docker", "compose", "version"], capture_output=True, text=True, check=False, timeout=10)
+             if backend.returncode != 0:
+                  return {"error": "Preflight failed: docker compose plugin unavailable."}
              compose_path = _compose_path(app_config.raw, project)
              data = _load_compose(compose_path)
 
+             import re
+             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", service):
+                  return {"error": "Invalid service name"}
              if service not in data.get("services", {}):
                   return {"error": f"Service '{service}' not found in project '{project}'"}
 
@@ -246,6 +282,7 @@ def register_compose_tools(mcp: Any, app_config: Any) -> None:
                   "project": project,
                   "service": service,
                   "compose_path": str(compose_path),
+                  "project_directory": _host_project_directory(app_config, compose_path),
                   "snapshot": {"container": snapshot, "compose_hash": compose_hash},
                   "risks": risks,
                   "message": "Preflight complete. Review risks before approving deployment."
@@ -278,6 +315,7 @@ def register_compose_tools(mcp: Any, app_config: Any) -> None:
                  "project": project,
                  "service": service,
                  "compose_path": preflight["compose_path"],
+                 "project_directory": preflight["project_directory"],
                  "snapshot": preflight["snapshot"],
                  "policy_digest": current_policy_digest,
                  "allow_build": allow_build
@@ -392,10 +430,18 @@ def execute_docker_compose_up_service(parameters: Dict[str, Any], app_config: An
     except Exception as e:
         return False, {"error": f"Failed to validate pre-conditions: {e}"}
 
+    try:
+        project_directory = _host_project_directory(app_config, current_compose_path)
+        if parameters.get("project_directory", str(current_compose_path.parent)) != project_directory:
+            return False, {"error": "Approved host project directory changed."}
+    except Exception as e:
+        return False, {"error": str(e)}
+
     # Execute docker compose up
-    cmd = ["docker", "compose", "-f", str(current_compose_path), "up", "-d", "--no-deps"]
+    cmd = ["docker", "compose", "-f", str(current_compose_path), "--project-directory", project_directory, "up", "-d", "--no-deps"]
     if allow_build:
          cmd.append("--build")
+    cmd.append(service)
 
     try:
         proc = subprocess.run(cmd, text=True, capture_output=True, timeout=120, check=False)
@@ -403,7 +449,7 @@ def execute_docker_compose_up_service(parameters: Dict[str, Any], app_config: An
         if proc.returncode != 0:
             raise IndeterminateStateError(f"docker compose up failed. Exit code {proc.returncode}. Error: {proc.stderr}")
 
-        return True, {"message": f"Successfully updated service {service}", "stdout": proc.stdout}
+        return True, {"message": f"Compose command completed for service {service}", "project": project, "service": service, "verification": "health_check_pending"}
     except IndeterminateStateError:
         raise
     except Exception as e:

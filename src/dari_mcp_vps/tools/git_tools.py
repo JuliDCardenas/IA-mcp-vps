@@ -73,6 +73,8 @@ def register_git_tools(mcp: Any, app_config: Any) -> None:
 
         try:
              target = resolve_allowed_path(app_config.raw, scope, path)
+             from dari_mcp_vps.security import assert_core_mutation_path
+             assert_core_mutation_path(app_config.raw, scope, target, repository=True)
 
              scopes = app_config.raw.get('allowed_paths', {})
              is_writable = False
@@ -160,6 +162,8 @@ def execute_git_update_ff_only(parameters: Dict[str, Any], app_config: Any) -> T
 
     try:
         target = resolve_allowed_path(app_config.raw, scope, path)
+        from dari_mcp_vps.security import assert_core_mutation_path
+        assert_core_mutation_path(app_config.raw, scope, target, repository=True)
 
         # Ensure scope is writable
         scopes = app_config.raw.get('allowed_paths', {})
@@ -210,7 +214,13 @@ def execute_git_update_ff_only(parameters: Dict[str, Any], app_config: Any) -> T
 
     # Fetch and check if fast-forward is possible
     try:
-        _run_git(target, ["fetch", remote, branch])
+        import re
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", remote) or remote.startswith("-") or not re.fullmatch(r"[0-9a-f]{40}", target_sha):
+             return False, {"error": "Invalid remote or full target SHA"}
+        remote_url = _run_git(target, ["remote", "get-url", remote])
+        if not re.fullmatch(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?", remote_url):
+             return False, {"error": "Git mutation requires an existing credential-free HTTPS GitHub remote"}
+        _run_git(target, ["-c", "core.hooksPath=/dev/null", "-c", "protocol.ext.allow=never", "fetch", remote, branch])
         # Validate target_sha exists in remote tracking branch
         remote_sha = _run_git(target, ["rev-parse", f"{remote}/{branch}"])
         # Even if target_sha is not the absolute tip of remote/branch, it must be an ancestor of it or the tip itself,
@@ -226,7 +236,9 @@ def execute_git_update_ff_only(parameters: Dict[str, Any], app_config: Any) -> T
              return False, {"error": "Cannot fast-forward. HEAD is not an ancestor of Target SHA."}
 
         # Perform the actual fast-forward update
-        _run_git(target, ["merge", "--ff-only", target_sha])
+        if not remote or remote.startswith("-") or not __import__("re").fullmatch(r"[0-9a-f]{40}", target_sha):
+             return False, {"error": "Remote and target SHA must be exact non-option values"}
+        _run_git(target, ["-c", "core.hooksPath=/dev/null", "merge", "--ff-only", target_sha])
 
         new_head = _run_git(target, ["rev-parse", "HEAD"])
         if new_head != target_sha:

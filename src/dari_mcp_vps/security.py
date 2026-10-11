@@ -175,3 +175,24 @@ def assert_docker_permission(config, container_info, action: str):
         for identity in identities:
             if _matches_any(identity, [exclude]):
                 raise SecurityError(f"Container denied by blacklist ({exclude}) for action {action}")
+
+
+def assert_core_mutation_path(config, scope, path: Path, *, repository=False):
+    """Write-only guard. Does not alter legacy readers or accepted PR32 risks."""
+    scope_cfg = config.get("allowed_paths", {}).get(scope, {})
+    if scope_cfg.get("writable") is not True:
+        raise SecurityError("Mutation scope must be explicitly writable")
+    root = Path(scope_cfg["root"]).resolve()
+    canonical = path.resolve()
+    if not canonical.is_relative_to(root):
+        raise SecurityError("Mutation path escapes writable scope")
+    parts = {part.lower() for part in canonical.parts}
+    if parts.intersection({".ssh", ".local", "ia-mcp-vps", "n8n"}):
+        raise SecurityError("Protected control-plane or private storage cannot be mutated")
+    if repository:
+        if canonical != root:
+            raise SecurityError("Git mutation must target the canonical scope repository root")
+        return
+    if ".git" in parts or canonical.name.startswith(".env") or canonical.suffix.lower() in {".pem", ".key", ".db", ".sqlite", ".sqlite3"} or canonical.name in {"id_rsa", "id_ed25519", "authorized_keys"}:
+        raise SecurityError("Secret, repository metadata or database file cannot be mutated")
+    assert_allowed_extension(config, scope, canonical)

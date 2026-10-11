@@ -126,6 +126,8 @@ def register_filesystem_tools(mcp, app_config):
         # Validation preview without effects
         try:
              target = resolve_allowed_path(app_config.raw, scope, path)
+             from dari_mcp_vps.security import assert_core_mutation_path
+             assert_core_mutation_path(app_config.raw, scope, target)
 
              scopes = app_config.raw.get('allowed_paths', {})
              is_writable = False
@@ -228,6 +230,8 @@ def execute_patch_file_atomic(parameters: Dict[str, Any], app_config: Any) -> Tu
     try:
         from dari_mcp_vps.security import resolve_allowed_path, is_denied_path
         target = resolve_allowed_path(app_config.raw, scope, path)
+        from dari_mcp_vps.security import assert_core_mutation_path
+        assert_core_mutation_path(app_config.raw, scope, target)
 
         # Ensure scope is writable
         scopes = app_config.raw.get('allowed_paths', {})
