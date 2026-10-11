@@ -1,12 +1,17 @@
+FROM docker:27.5.1-cli AS docker_cli
+
 FROM python:3.12-slim
 
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    docker.io \
     ripgrep \
     git \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=docker_cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker_cli /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
+RUN docker --version && docker compose version
 
 COPY pyproject.toml README.md ./
 COPY src ./src

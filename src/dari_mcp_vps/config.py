@@ -45,6 +45,149 @@ class AppConfig:
     def n8n_webhook_key(self):
         return os.getenv('N8N_WEBHOOK_KEY', self.raw.get('jules', {}).get('n8n_webhook_key', ''))
 
+    @property
+    def approval_enabled(self):
+        # Strictly check the os.environ so it cannot be enabled by yaml without explicitly configuring env
+        enabled = str(os.getenv('APPROVAL_ENABLED', 'false')).lower() == 'true'
+        if enabled:
+            import urllib.parse
+            import re
+
+            # Require exact strings for auth
+            if not self.approval_webhook_secret or not self.approval_n8n_webhook_key:
+                return False
+
+            # Strictly validate numeric Telegram IDs
+            if not re.match(r'^-?\d+$', self.approval_telegram_user_id) or not re.match(r'^-?\d+$', self.approval_telegram_chat_id):
+                return False
+
+            # Strictly validate HTTPS URL structure
+            try:
+                parsed = urllib.parse.urlparse(self.approval_n8n_webhook_url)
+                if parsed.scheme != "https" or not parsed.netloc:
+                    return False
+            except Exception:
+                return False
+
+        return enabled
+
+    @property
+    def approval_db_path(self):
+        return os.getenv('APPROVAL_DB_PATH', self.raw.get('approvals', {}).get('db_path', '/var/lib/coding-jobs/approvals.db'))
+
+    @property
+    def approval_n8n_webhook_url(self):
+        return os.getenv('APPROVAL_N8N_WEBHOOK_URL', self.raw.get('approvals', {}).get('n8n_webhook_url', ''))
+
+    @property
+    def approval_n8n_webhook_key(self):
+        return os.getenv('APPROVAL_N8N_WEBHOOK_KEY', '')
+
+    @property
+    def approval_webhook_secret(self):
+        return os.getenv('APPROVAL_WEBHOOK_SECRET', '')
+
+    @property
+    def approval_telegram_user_id(self):
+        return os.getenv('APPROVAL_TELEGRAM_USER_ID', '')
+
+    @property
+    def approval_telegram_chat_id(self):
+        return os.getenv('APPROVAL_TELEGRAM_CHAT_ID', '')
+
+
+    @property
+    def security_mode(self):
+        mode = self.raw.get('security', {}).get('mode', 'legacy')
+        if mode not in ('legacy', 'blacklist'):
+            return 'legacy'
+        return mode
+
+    @property
+    def docker_blacklist(self):
+        bl = self.raw.get('security', {}).get('docker_blacklist', {})
+        if not isinstance(bl, dict):
+            raise ValueError("docker_blacklist must be a dictionary")
+
+        read_exc = bl.get('read_excludes', [])
+        mutate_exc = bl.get('mutate_excludes', [])
+
+        if not isinstance(read_exc, list) or any(not isinstance(i, str) or not i.strip() for i in read_exc):
+            raise ValueError("docker_blacklist.read_excludes must be a list of non-empty strings")
+        if not isinstance(mutate_exc, list) or any(not isinstance(i, str) or not i.strip() for i in mutate_exc):
+            raise ValueError("docker_blacklist.mutate_excludes must be a list of non-empty strings")
+
+        return {
+            "read_excludes": read_exc,
+            "mutate_excludes": mutate_exc
+        }
+
+    @property
+    def files_blacklist(self):
+        bl = self.raw.get('security', {}).get('files_blacklist', {})
+        if not isinstance(bl, dict):
+            raise ValueError("files_blacklist must be a dictionary")
+
+        roots = bl.get('managed_roots', [])
+        excludes = bl.get('file_excludes', [])
+
+        if not isinstance(roots, list) or any(not isinstance(i, str) or not i.strip() for i in roots):
+            raise ValueError("files_blacklist.managed_roots must be a list of non-empty strings")
+        if not isinstance(excludes, list) or any(not isinstance(i, str) or not i.strip() for i in excludes):
+            raise ValueError("files_blacklist.file_excludes must be a list of non-empty strings")
+
+        for r in roots:
+            import os
+            from pathlib import Path
+            p = Path(r).resolve()
+            if str(p) == "/" or str(p) == "":
+                raise ValueError(f"Managed root cannot be the root filesystem: {r}")
+
+        return {
+            "managed_roots": roots,
+            "file_excludes": excludes
+        }
+
+    @property
+    def allowed_containers(self):
+        return self.raw.get('allowed_containers', [])
+
+    @property
+    def allowed_http_targets(self):
+        return self.raw.get('allowed_http_targets', {})
+
+    def get_tool_policy(self, tool_name: str) -> dict:
+        """
+        Retrieves the strict security policy for a specific tool.
+        If a policy is malformed, disabled, or missing, it fails closed.
+        """
+        tool_config = self.raw.get('tools', {}).get(tool_name, {})
+
+        # Policy missing or explicitly disabled fails closed
+        if not tool_config or str(tool_config.get('enabled', 'false')).lower() != 'true':
+            return {"enabled": False, "requires_approval": True, "targets": []}
+
+        # requires_approval falls back to True unless explicitly set to 'false'
+        req_approval_raw = str(tool_config.get('requires_approval', 'true')).lower()
+        requires_approval = req_approval_raw != 'false'
+
+        raw_targets = tool_config.get('targets', [])
+        if not isinstance(raw_targets, list):
+            raw_targets = []
+
+        if self.security_mode == 'blacklist':
+            intersected_targets = raw_targets
+        else:
+            # Legacy mode: Intersect policy targets with global allowed_containers to strictly prevent scope expansion
+            global_allowed = set(self.allowed_containers)
+            intersected_targets = list(set(raw_targets) & global_allowed)
+
+        return {
+            "enabled": True,
+            "requires_approval": requires_approval,
+            "targets": intersected_targets
+        }
+
 def load_config(path=None):
     p = Path(path or os.getenv('IA_MCP_VPS_CONFIG', 'config.yaml')).expanduser().resolve()
     if not p.exists():

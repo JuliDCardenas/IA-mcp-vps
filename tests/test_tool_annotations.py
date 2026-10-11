@@ -24,6 +24,10 @@ EXPECTED_CLASSIFICATION = {
     "validate_yaml": True,
     "validate_json": True,
     "git_status": True,
+    "patch_file_atomic": False,
+    "git_update_ff_only": False,
+    "deployment_preflight": True,
+    "docker_compose_up_service": False,
 
     "coding_repository_list": False,
     "coding_job_create": False,
@@ -41,6 +45,10 @@ EXPECTED_CLASSIFICATION = {
     "coding_job_cancel": False,
     "coding_job_cleanup": False,
     "coding_private_job_create": False,
+
+    "approval_simulate_request": False,
+    "approval_status": True,
+    "approval_wait": True,
 
     "jules_request_coding_task": False,
     "jules_reply_to_task": False,
@@ -74,6 +82,10 @@ EXPECTED_TAGS = {
     "validate_yaml": "repositorios_archivos",
     "validate_json": "repositorios_archivos",
     "git_status": "repositorios_archivos",
+    "patch_file_atomic": ["repositorios_archivos", "mutaciones"],
+    "git_update_ff_only": ["repositorios_archivos", "mutaciones"],
+    "deployment_preflight": "vps",
+    "docker_compose_up_service": ["vps", "mutaciones"],
 
     "coding_repository_list": "agy",
     "coding_job_create": "agy",
@@ -91,6 +103,10 @@ EXPECTED_TAGS = {
     "coding_job_cancel": "agy",
     "coding_job_cleanup": "agy",
     "coding_private_job_create": "agy",
+
+    "approval_simulate_request": "agy",
+    "approval_status": "agy",
+    "approval_wait": "agy",
 
     "jules_request_coding_task": "jules",
     "jules_reply_to_task": "jules",
@@ -145,7 +161,7 @@ async def test_tool_annotations(test_mcp_app):
         # Verify tags are preserved
         tags = getattr(local_tool, 'tags', set())
         expected_tag = EXPECTED_TAGS[t.name]
-        assert tags == {expected_tag}, f"Tool {t.name} has tags {tags}, expected {{{expected_tag}}}"
+        assert tags == set(expected_tag) if isinstance(expected_tag, list) else tags == {expected_tag}, f"Tool {t.name} has tags {tags}, expected {{{expected_tag}}}"
 
         # Verify annotations for readOnlyHint via standard MCP model_dump(by_alias=True)
         # FastMCP parses it into mcp.types.Tool properties, so we can check the serialized form.
