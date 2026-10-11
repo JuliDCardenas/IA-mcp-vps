@@ -60,7 +60,7 @@ docker compose "${args[@]}" config --quiet
 # Build before stopping old MCP. If build fails, restore config manually from backup; old process still running.
 docker compose "${args[@]}" build ia-mcp-vps
 # Prove Python and CLI work as configured user before recreating the MCP.
-docker compose "${args[@]}" run --rm --no-deps --entrypoint sh ia-mcp-vps -c 'docker --version && docker compose version && python -m compileall -q /app/src'
+docker compose "${args[@]}" run --rm --no-deps --entrypoint sh ia-mcp-vps -c 'docker --version && docker compose version && python -X pycache_prefix=/tmp/mcp-install-pycache -m compileall -q /app/src'
 docker compose "${args[@]}" up -d --no-deps --force-recreate ia-mcp-vps
 sleep 3
 docker exec ia-mcp-vps python -c "from dari_mcp_vps.config import load_config; c=load_config(); print('approval_enabled:', c.approval_enabled); print('security_mode:', c.security_mode); assert c.approval_enabled and c.security_mode == 'blacklist', 'Approval configuration not active'"
