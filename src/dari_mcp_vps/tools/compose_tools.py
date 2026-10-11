@@ -33,18 +33,14 @@ def _compose_path(config: dict[str, Any], project: str) -> Path:
              from dari_mcp_vps.security import SecurityError, resolve_allowed_path
              path = None
 
-             try:
-                 candidate = resolve_allowed_path(config, project, "docker-compose.yml")
-                 if candidate.exists():
-                     path = candidate
-             except Exception:
-                 pass
-
-             if not path:
+             # Standard Compose precedence; every candidate uses the same
+             # managed-root, canonical-path and exclusion checks.
+             for filename in ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml"):
                  try:
-                     candidate = resolve_allowed_path(config, project, "compose.yaml")
+                     candidate = resolve_allowed_path(config, project, filename)
                      if candidate.exists():
                          path = candidate
+                         break
                  except Exception:
                      pass
 
